@@ -159,13 +159,13 @@ class Source(models.Model):
     }
     # Format to use to display a URL for the source
     URLS = {
-        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/c/{key}',
+        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/{key}',
         SOURCE_TYPE_YOUTUBE_CHANNEL_ID: 'https://www.youtube.com/channel/{key}',
         SOURCE_TYPE_YOUTUBE_PLAYLIST: 'https://www.youtube.com/playlist?list={key}',
     }
     # Format used to create indexable URLs
     INDEX_URLS = {
-        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/c/{key}/{type}',
+        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/{key}/{type}',
         SOURCE_TYPE_YOUTUBE_CHANNEL_ID: 'https://www.youtube.com/channel/{key}/{type}',
         SOURCE_TYPE_YOUTUBE_PLAYLIST: 'https://www.youtube.com/playlist?list={key}',
     }
