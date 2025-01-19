@@ -5,17 +5,27 @@
 
 
 import os
+from pathlib import Path
 from django.conf import settings
 from copy import copy
 from common.logger import log
 import yt_dlp
 
 
-_youtubedl_cachedir = getattr(settings, 'YOUTUBE_DL_CACHEDIR', None)
 _defaults = getattr(settings, 'YOUTUBE_DEFAULTS', {})
+_youtubedl_cachedir = getattr(settings, 'YOUTUBE_DL_CACHEDIR', None)
 if _youtubedl_cachedir:
     _youtubedl_cachedir = str(_youtubedl_cachedir)
     _defaults['cachedir'] = _youtubedl_cachedir
+_youtubedl_tempdir = getattr(settings, 'YOUTUBE_DL_TEMPDIR', None)
+if _youtubedl_tempdir:
+    _youtubedl_tempdir = str(_youtubedl_tempdir)
+    _youtubedl_tempdir_path = Path(_youtubedl_tempdir)
+    _youtubedl_tempdir_path.mkdir(parents=True, exist_ok=True)
+    (_youtubedl_tempdir_path / '.ignore').touch(exist_ok=True)
+    _paths = _defaults.get('paths', {})
+    _paths.update({ 'temp': _youtubedl_tempdir, })
+    _defaults['paths'] = _paths
 
 
 
@@ -39,7 +49,6 @@ def get_channel_image_info(url):
     opts = get_yt_opts()
     opts.update({
         'skip_download': True,
-        'forcejson': True,
         'simulate': True,
         'logger': log,
         'extract_flat': True,  # Change to False to get detailed info
@@ -64,6 +73,28 @@ def get_channel_image_info(url):
             raise YouTubeError(f'Failed to extract channel info for "{url}": {e}') from e
 
 
+def _subscriber_only(msg='', response=None):
+    if response is None:
+        # process msg only
+        msg = str(msg)
+        if 'access to members-only content' in msg:
+            return True
+        if ': Join this channel' in msg:
+            return True
+        if 'Join this YouTube channel' in msg:
+            return True
+    else:
+        # ignore msg entirely
+        if not isinstance(response, dict):
+            raise TypeError(f'response must be a dict, got "{type(response)}" instead')
+
+        if 'availability' not in response.keys():
+            return False
+
+        # check for the specific expected value
+        return 'subscriber_only' == response.get('availability')
+    return False
+
 
 def get_media_info(url):
     '''
@@ -73,8 +104,9 @@ def get_media_info(url):
     '''
     opts = get_yt_opts()
     opts.update({
+        'ignoreerrors': False, # explicitly set this to catch exceptions
+        'ignore_no_formats_error': False, # we must fail first to try again with this enabled
         'skip_download': True,
-        'forcejson': True,
         'simulate': True,
         'logger': log,
         'extract_flat': True,
@@ -84,7 +116,19 @@ def get_media_info(url):
         try:
             response = y.extract_info(url, download=False)
         except yt_dlp.utils.DownloadError as e:
-            raise YouTubeError(f'Failed to extract_info for "{url}": {e}') from e
+            if not _subscriber_only(msg=e.msg):
+                raise YouTubeError(f'Failed to extract_info for "{url}": {e}') from e
+            # adjust options and try again
+            opts.update({'ignore_no_formats_error': True,})
+            with yt_dlp.YoutubeDL(opts) as yy:
+                try:
+                    response = yy.extract_info(url, download=False)
+                except yt_dlp.utils.DownloadError as ee:
+                    raise YouTubeError(f'Failed (again) to extract_info for "{url}": {ee}') from ee
+                # validate the response is what we expected
+                if not _subscriber_only(response=response):
+                    response = {}
+
     if not response:
         raise YouTubeError(f'Failed to extract_info for "{url}": No metadata was '
                            f'returned by youtube-dl, check for error messages in the '
@@ -140,8 +184,10 @@ def download_media(url, media_format, extension, output_file, info_json,
     ytopts = {
         'format': media_format,
         'merge_output_format': extension,
-        'outtmpl': output_file,
-        'quiet': True,
+        'outtmpl': os.path.basename(output_file),
+        'quiet': False if settings.DEBUG else True,
+        'verbose': True if settings.DEBUG else False,
+        'noprogress': None if settings.DEBUG else True,
         'progress_hooks': [hook],
         'writeinfojson': info_json,
         'postprocessors': [],
@@ -161,6 +207,10 @@ def download_media(url, media_format, extension, output_file, info_json,
         'add_metadata': embed_metadata
     }
     opts = get_yt_opts()
+    ytopts['paths'] = opts.get('paths', {})
+    ytopts['paths'].update({
+        'home': os.path.dirname(output_file),
+    })
     if embed_thumbnail:
         ytopts['postprocessors'].append({'key': 'EmbedThumbnail'})
     if skip_sponsors:

@@ -150,13 +150,22 @@ MEDIA_THUMBNAIL_WIDTH = 430                 # Width in pixels to resize thumbnai
 MEDIA_THUMBNAIL_HEIGHT = 240                # Height in pixels to resize thumbnails to
 
 
-VIDEO_HEIGHT_CUTOFF = 240       # Smallest resolution in pixels permitted to download
-VIDEO_HEIGHT_IS_HD = 500        # Height in pixels to count as 'HD'
+VIDEO_HEIGHT_CUTOFF = 240                   # Smallest resolution in pixels permitted to download
+VIDEO_HEIGHT_IS_HD = 500                    # Height in pixels to count as 'HD'
+
+
+
+# If True source directories are prefixed with their type (either 'video' or 'audio')
+# e.g. /downloads/video/SomeSourceName
+# If False, sources are placed directly in /downloads
+# e.g. /downloads/SomeSourceName
+SOURCE_DOWNLOAD_DIRECTORY_PREFIX = True
 
 
 YOUTUBE_DL_CACHEDIR = None
+YOUTUBE_DL_TEMPDIR = None
 YOUTUBE_DEFAULTS = {
-    'no_color': True,       # Do not use colours in output
+    'color': 'never',       # Do not use colours in output
     'age_limit': 99,        # 'Age in years' to spoof
     'ignoreerrors': True,   # Skip on errors (such as unavailable videos in playlists)
     'cachedir': False,      # Disable on-disk caching

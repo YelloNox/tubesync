@@ -19,7 +19,7 @@ from common.utils import clean_filename, clean_emoji
 from .youtube import (get_media_info as get_youtube_media_info,
                       download_media as download_youtube_media,
                       get_channel_image_info as get_youtube_channel_image_info)
-from .utils import seconds_to_timestr, parse_media_format
+from .utils import seconds_to_timestr, parse_media_format, filter_response
 from .matching import (get_best_combined_format, get_best_audio_format,
                        get_best_video_format)
 from .mediaservers import PlexMediaServer
@@ -422,7 +422,7 @@ class Source(models.Model):
         help_text=_('List of subtitles langs to download, comma-separated. Example: en,fr or all,-fr,-live_chat'),
         validators=[
             RegexValidator(
-                regex=r"^(\-?[\_\.a-zA-Z]+,)*(\-?[\_\.a-zA-Z]+){1}$",
+                regex=r"^(\-?[\_\.a-zA-Z-]+(,|$))+",
                 message=_('Subtitle langs must be a comma-separated list of langs. example: en,fr or all,-fr,-live_chat')
             )
         ]
@@ -457,6 +457,14 @@ class Source(models.Model):
         delta = self.download_cap
         if delta > 0:
             return timezone.now() - timedelta(seconds=delta)
+        else:
+            return False
+
+    @property
+    def days_to_keep_date(self):
+        delta = self.days_to_keep
+        if delta > 0:
+            return timezone.now() - timedelta(days=delta)
         else:
             return False
 
@@ -514,10 +522,13 @@ class Source(models.Model):
 
     @property
     def type_directory_path(self):
-        if self.source_resolution == self.SOURCE_RESOLUTION_AUDIO:
-            return Path(settings.DOWNLOAD_AUDIO_DIR) / self.directory
+        if settings.SOURCE_DOWNLOAD_DIRECTORY_PREFIX:
+            if self.source_resolution == self.SOURCE_RESOLUTION_AUDIO:
+                return Path(settings.DOWNLOAD_AUDIO_DIR) / self.directory
+            else:
+                return Path(settings.DOWNLOAD_VIDEO_DIR) / self.directory
         else:
-            return Path(settings.DOWNLOAD_VIDEO_DIR) / self.directory
+            return Path(self.directory)
 
     def make_directory(self):
         return os.makedirs(self.directory_path, exist_ok=True)
@@ -578,6 +589,7 @@ class Source(models.Model):
             'key': 'SoMeUnIqUiD',
             'format': '-'.join(fmt),
             'playlist_title': 'Some Playlist Title',
+            'video_order': '01',
             'ext': self.extension,
             'resolution': self.source_resolution if self.source_resolution else '',
             'height': '720' if self.source_resolution else '',
@@ -1117,6 +1129,7 @@ class Media(models.Model):
             'key': self.key,
             'format': '-'.join(display_format['format']),
             'playlist_title': self.playlist_title,
+            'video_order': self.get_episode_str(True),
             'ext': self.source.extension,
             'resolution': display_format['resolution'],
             'height': display_format['height'],
@@ -1132,8 +1145,39 @@ class Media(models.Model):
     def has_metadata(self):
         return self.metadata is not None
 
+
+    @property
+    def reduce_data(self):
+        try:
+            from common.logger import log
+            from common.utils import json_serial
+
+            old_mdl = len(self.metadata or "")
+            data = json.loads(self.metadata or "")
+            compact_json = json.dumps(data, separators=(',', ':'), default=json_serial)
+            
+            filtered_data = filter_response(data, True)
+            filtered_json = json.dumps(filtered_data, separators=(',', ':'), default=json_serial)
+        except Exception as e:
+            log.exception('reduce_data: %s', e)
+        else:
+            # log the results of filtering / compacting on metadata size
+            new_mdl = len(compact_json)
+            if old_mdl > new_mdl:
+                delta = old_mdl - new_mdl
+                log.info(f'{self.key}: metadata compacted by {delta:,} characters ({old_mdl:,} -> {new_mdl:,})')
+            new_mdl = len(filtered_json)
+            if old_mdl > new_mdl:
+                delta = old_mdl - new_mdl
+                log.info(f'{self.key}: metadata reduced by {delta:,} characters ({old_mdl:,} -> {new_mdl:,})')
+                if getattr(settings, 'SHRINK_OLD_MEDIA_METADATA', False):
+                    self.metadata = filtered_json
+
+
     @property
     def loaded_metadata(self):
+        if getattr(settings, 'SHRINK_OLD_MEDIA_METADATA', False):
+            self.reduce_data
         try:
             data = json.loads(self.metadata)
             if not isinstance(data, dict):
@@ -1251,55 +1295,51 @@ class Media(models.Model):
         return media_format.format(**media_details)
 
     @property
-    def thumbname(self):
-        if self.downloaded and self.media_file:
-            filename = os.path.basename(self.media_file.path)
-        else:
-            filename = self.filename
-        prefix, ext = os.path.splitext(filename)
-        return f'{prefix}.jpg'
-
-    @property
-    def thumbpath(self):
-        return self.source.directory_path / self.thumbname
-
-    @property
-    def nfoname(self):
-        if self.downloaded and self.media_file:
-            filename = os.path.basename(self.media_file.path)
-        else:
-            filename = self.filename
-        prefix, ext = os.path.splitext(filename)
-        return f'{prefix}.nfo'
-    
-    @property
-    def nfopath(self):
-        return self.source.directory_path / self.nfoname
-
-    @property
-    def jsonname(self):
-        if self.downloaded and self.media_file:
-            filename = os.path.basename(self.media_file.path)
-        else:
-            filename = self.filename
-        prefix, ext = os.path.splitext(filename)
-        return f'{prefix}.info.json'
-    
-    @property
-    def jsonpath(self):
-        return self.source.directory_path / self.jsonname
-
-    @property
     def directory_path(self):
-        # Otherwise, create a suitable filename from the source media_format
-        media_format = str(self.source.media_format)
-        media_details = self.format_dict
-        dirname = self.source.directory_path / media_format.format(**media_details)
-        return os.path.dirname(str(dirname))
+        return self.filepath.parent
 
     @property
     def filepath(self):
         return self.source.directory_path / self.filename
+
+    @property
+    def thumbname(self):
+        if self.downloaded and self.media_file:
+            filename = self.media_file.path
+        else:
+            filename = self.filename
+        prefix, ext = os.path.splitext(os.path.basename(filename))
+        return f'{prefix}.jpg'
+
+    @property
+    def thumbpath(self):
+        return self.directory_path / self.thumbname
+
+    @property
+    def nfoname(self):
+        if self.downloaded and self.media_file:
+            filename = self.media_file.path
+        else:
+            filename = self.filename
+        prefix, ext = os.path.splitext(os.path.basename(filename))
+        return f'{prefix}.nfo'
+    
+    @property
+    def nfopath(self):
+        return self.directory_path / self.nfoname
+
+    @property
+    def jsonname(self):
+        if self.downloaded and self.media_file:
+            filename = self.media_file.path
+        else:
+            filename = self.filename
+        prefix, ext = os.path.splitext(os.path.basename(filename))
+        return f'{prefix}.info.json'
+    
+    @property
+    def jsonpath(self):
+        return self.directory_path / self.jsonname
 
     @property
     def thumb_file_exists(self):
@@ -1345,7 +1385,7 @@ class Media(models.Model):
         nfo.text = '\n  '
         # title = media metadata title
         title = nfo.makeelement('title', {})
-        title.text = clean_emoji(str(self.name).strip())
+        title.text = clean_emoji(self.title)
         title.tail = '\n  '
         nfo.append(title)
         # showtitle = source name
@@ -1365,8 +1405,7 @@ class Media(models.Model):
         nfo.append(season)
         # episode = number of video in the year
         episode = nfo.makeelement('episode', {})
-        episode_number = self.calculate_episode_number()
-        episode.text = str(episode_number) if episode_number else ''
+        episode.text = self.get_episode_str()
         episode.tail = '\n  '
         nfo.append(episode)
         # ratings = media metadata youtube rating
@@ -1379,7 +1418,7 @@ class Media(models.Model):
         rating_attrs = OrderedDict()
         rating_attrs['name'] = 'youtube'
         rating_attrs['max'] = '5'
-        rating_attrs['default'] = 'True'
+        rating_attrs['default'] = 'true'
         rating = nfo.makeelement('rating', rating_attrs)
         rating.text = '\n      '
         rating.append(value)
@@ -1387,7 +1426,8 @@ class Media(models.Model):
         rating.tail = '\n  '
         ratings = nfo.makeelement('ratings', {})
         ratings.text = '\n    '
-        ratings.append(rating)
+        if self.rating is not None:
+            ratings.append(rating)
         ratings.tail = '\n  '
         nfo.append(ratings)
         # plot = media metadata description
@@ -1404,7 +1444,8 @@ class Media(models.Model):
         mpaa = nfo.makeelement('mpaa', {})
         mpaa.text = str(self.age_limit)
         mpaa.tail = '\n  '
-        nfo.append(mpaa)
+        if self.age_limit and self.age_limit > 0:
+            nfo.append(mpaa)
         # runtime = media metadata duration in seconds
         runtime = nfo.makeelement('runtime', {})
         runtime.text = str(self.duration)
@@ -1491,7 +1532,16 @@ class Media(models.Model):
         if not callable(indexer):
             raise Exception(f'Media with source type f"{self.source.source_type}" '
                             f'has no indexer')
-        return indexer(self.url)
+        response = indexer(self.url)
+        no_formats_available = (
+            not response or
+            "formats" not in response.keys() or
+            0 == len(response["formats"])
+        )
+        if no_formats_available:
+            self.can_download = False
+            self.skip = True
+        return response
 
     def calculate_episode_number(self):
         if self.source.source_type == Source.SOURCE_TYPE_YOUTUBE_PLAYLIST:
@@ -1506,6 +1556,16 @@ class Media(models.Model):
             if media == self:
                 return position_counter
             position_counter += 1
+
+    def get_episode_str(self, use_padding=False):
+        episode_number = self.calculate_episode_number()
+        if not episode_number:
+            return ''
+
+        if use_padding:
+            return f'{episode_number:02}'
+        
+        return str(episode_number)
 
 
 class MediaServer(models.Model):
