@@ -137,17 +137,17 @@ class Source(models.Model):
     )
     embed_metadata = models.BooleanField(
         _('embed metadata'),
-        default=False,
+        default=True,
         help_text=_('Embed metadata from source into file')
     )
     embed_thumbnail = models.BooleanField(
         _('embed thumbnail'),
-        default=False,
+        default=True,
         help_text=_('Embed thumbnail into the file')
     )
     enable_sponsorblock = models.BooleanField(
         _('enable sponsorblock'),
-        default=True,
+        default=False,
         help_text=_('Use SponsorBlock?')
     )
 
@@ -159,13 +159,13 @@ class Source(models.Model):
     }
     # Format to use to display a URL for the source
     URLS = {
-        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/c/{key}',
+        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/{key}',
         SOURCE_TYPE_YOUTUBE_CHANNEL_ID: 'https://www.youtube.com/channel/{key}',
         SOURCE_TYPE_YOUTUBE_PLAYLIST: 'https://www.youtube.com/playlist?list={key}',
     }
     # Format used to create indexable URLs
     INDEX_URLS = {
-        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/c/{key}/{type}',
+        SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/{key}/{type}',
         SOURCE_TYPE_YOUTUBE_CHANNEL_ID: 'https://www.youtube.com/channel/{key}/{type}',
         SOURCE_TYPE_YOUTUBE_PLAYLIST: 'https://www.youtube.com/playlist?list={key}',
     }
@@ -349,7 +349,7 @@ class Source(models.Model):
         max_length=8,
         db_index=True,
         choices=SOURCE_VCODEC_CHOICES,
-        default=SOURCE_VCODEC_VP9,
+        default=SOURCE_VCODEC_AVC1,
         help_text=_('Source video codec, desired video encoding format to download (ignored if "resolution" is audio only)')
     )
     source_acodec = models.CharField(
@@ -380,7 +380,7 @@ class Source(models.Model):
     )
     copy_channel_images = models.BooleanField(
         _('copy channel images'),
-        default=False,
+        default=True,
         help_text=_('Copy channel banner and avatar. These may be detected and used by some media servers')
     )
     copy_thumbnails = models.BooleanField(
@@ -390,12 +390,12 @@ class Source(models.Model):
     )
     write_nfo = models.BooleanField(
         _('write nfo'),
-        default=False,
+        default=True,
         help_text=_('Write an NFO file in XML with the media info, these may be detected and used by some media servers')
     )
     write_json = models.BooleanField(
         _('write json'),
-        default=False,
+        default=True,
         help_text=_('Write a JSON file with the media info, these may be detected and used by some media servers')
     )
     has_failed = models.BooleanField(

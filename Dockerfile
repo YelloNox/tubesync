@@ -231,6 +231,7 @@ ENV S6_VERSION="${S6_VERSION}" \
   FFMPEG_DATE="${FFMPEG_DATE}" \
   FFMPEG_VERSION="${FFMPEG_VERSION}"
 
+
 ENV DEBIAN_FRONTEND="noninteractive" \
   HOME="/root" \
   LANGUAGE="en_US.UTF-8" \
@@ -245,6 +246,7 @@ COPY --from=ffmpeg /usr/local/bin/ /usr/local/bin/
 
 # Reminder: the SHELL handles all variables
 RUN set -x && \
+
   apt-get update && \
   apt-get -y --no-install-recommends install locales && \
   printf -- "en_US.UTF-8 UTF-8\n" > /etc/locale.gen && \
