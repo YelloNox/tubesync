@@ -333,7 +333,7 @@ class Source(models.Model):
     )
     delete_files_on_disk = models.BooleanField(
         _('delete files on disk'),
-        default=False,
+        default=True,
         help_text=_('Delete files on disk when they are removed from TubeSync')
     )
     source_resolution = models.CharField(
