@@ -2,4 +2,4 @@
 
 cd /
 
-exec /usr/sbin/nginx
+/usr/sbin/nginx
