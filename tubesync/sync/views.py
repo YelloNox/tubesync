@@ -3,7 +3,6 @@ import os
 import json
 from base64 import b64decode
 import pathlib
-import shutil
 import sys
 from django.conf import settings
 from django.http import FileResponse, Http404, HttpResponseNotFound, HttpResponseRedirect
@@ -14,7 +13,7 @@ from django.views.generic.detail import SingleObjectMixin
 from django.core.exceptions import SuspiciousFileOperation
 from django.http import HttpResponse
 from django.urls import reverse_lazy
-from django.db import IntegrityError
+from django.db import connection, IntegrityError
 from django.db.models import Q, Count, Sum, When, Case
 from django.forms import Form, ValidationError
 from django.utils.text import slugify
@@ -25,12 +24,15 @@ from common.utils import append_uri_params
 from background_task.models import Task, CompletedTask
 from .models import Source, Media, MediaServer
 from .forms import (ValidateSourceForm, ConfirmDeleteSourceForm, RedownloadMediaForm,
-                    SkipMediaForm, EnableMediaForm, ResetTasksForm, PlexMediaServerForm,
+                    SkipMediaForm, EnableMediaForm, ResetTasksForm,
                     ConfirmDeleteMediaServerForm)
-from .utils import validate_url, delete_file
+from .utils import validate_url, delete_file, multi_key_sort
 from .tasks import (map_task_to_instance, get_error_message,
                     get_source_completed_tasks, get_media_download_task,
                     delete_task_by_media, index_source_task)
+from .choices import (Val, MediaServerType, SourceResolution,
+                        YouTube_SourceType, youtube_long_source_types,
+                        youtube_help, youtube_validation_urls)
 from . import signals
 from . import youtube
 
@@ -48,7 +50,7 @@ class DashboardView(TemplateView):
         # Sources
         data['num_sources'] = Source.objects.all().count()
         data['num_video_sources'] = Source.objects.filter(
-            ~Q(source_resolution=Source.SOURCE_RESOLUTION_AUDIO)
+            ~Q(source_resolution=Val(SourceResolution.AUDIO))
         ).count()
         data['num_audio_sources'] = data['num_sources'] - data['num_video_sources']
         data['num_failed_sources'] = Source.objects.filter(has_failed=True).count()
@@ -72,7 +74,9 @@ class DashboardView(TemplateView):
             data['average_bytes_per_media'] = 0
         # Latest downloads
         data['latest_downloads'] = Media.objects.filter(
-            downloaded=True, downloaded_filesize__isnull=False
+            downloaded=True,
+            download_date__isnull=False,
+            downloaded_filesize__isnull=False,
         ).defer('metadata').order_by('-download_date')[:10]
         # Largest downloads
         data['largest_downloads'] = Media.objects.filter(
@@ -85,6 +89,13 @@ class DashboardView(TemplateView):
         data['config_dir'] = str(settings.CONFIG_BASE_DIR)
         data['downloads_dir'] = str(settings.DOWNLOAD_ROOT)
         data['database_connection'] = settings.DATABASE_CONNECTION_STR
+        # Add the database filesize when using db.sqlite3
+        data['database_filesize'] = None
+        if 'sqlite' == connection.vendor:
+            db_name = str(connection.get_connection_params().get('database', ''))
+            db_path = pathlib.Path(db_name) if '/' == db_name[0] else None
+            if db_path:
+                data['database_filesize'] = db_path.stat().st_size
         return data
 
 
@@ -106,12 +117,15 @@ class SourcesView(ListView):
             sobj = Source.objects.get(pk=kwargs["pk"])
             if sobj is None:
                 return HttpResponseNotFound()
-            
+
             verbose_name = _('Index media from source "{}" once')
             index_source_task(
                 str(sobj.pk),
                 queue=str(sobj.pk),
                 repeat=0,
+                priority=10,
+                schedule=30,
+                remove_existing_tasks=False,
                 verbose_name=verbose_name.format(sobj.name))
             url = reverse_lazy('sync:sources')
             url = append_uri_params(url, {'message': 'source-refreshed'})
@@ -155,77 +169,15 @@ class ValidateSourceView(FormView):
         'invalid_url': _('Invalid URL, the URL must for a "{item}" must be in '
                          'the format of "{example}". The error was: {error}.'),
     }
-    source_types = {
-        'youtube-channel': Source.SOURCE_TYPE_YOUTUBE_CHANNEL,
-        'youtube-channel-id': Source.SOURCE_TYPE_YOUTUBE_CHANNEL_ID,
-        'youtube-playlist': Source.SOURCE_TYPE_YOUTUBE_PLAYLIST,
-    }
-    help_item = {
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL: _('YouTube channel'),
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL_ID: _('YouTube channel ID'),
-        Source.SOURCE_TYPE_YOUTUBE_PLAYLIST: _('YouTube playlist'),
-    }
-    help_texts = {
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL: _(
-            'Enter a YouTube channel URL into the box below. A channel URL will be in '
-            'the format of <strong>https://www.youtube.com/CHANNELNAME</strong> '
-            'where <strong>CHANNELNAME</strong> is the name of the channel you want '
-            'to add.'
-        ),
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL_ID: _(
-            'Enter a YouTube channel URL by channel ID into the box below. A channel '
-            'URL by channel ID will be in the format of <strong>'
-            'https://www.youtube.com/channel/BiGLoNgUnIqUeId</strong> '
-            'where <strong>BiGLoNgUnIqUeId</strong> is the ID of the channel you want '
-            'to add.'
-        ),
-        Source.SOURCE_TYPE_YOUTUBE_PLAYLIST: _(
-            'Enter a YouTube playlist URL into the box below. A playlist URL will be '
-            'in the format of <strong>https://www.youtube.com/playlist?list='
-            'BiGLoNgUnIqUeId</strong> where <strong>BiGLoNgUnIqUeId</strong> is the '
-            'unique ID of the playlist you want to add.'
-        ),
-    }
-    help_examples = {
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL: 'https://www.youtube.com/google',
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL_ID: ('https://www.youtube.com/channel/'
-                                                'UCK8sQmJBp8GCxrOtXWBpyEA'),
-        Source.SOURCE_TYPE_YOUTUBE_PLAYLIST: ('https://www.youtube.com/playlist?list='
-                                              'PL590L5WQmH8dpP0RyH5pCfIaDEdt9nk7r')
-    }
-    validation_urls = {
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL: {
-            'scheme': 'https',
-            'domains': ('m.youtube.com', 'www.youtube.com'),
-            'path_regex': '^\/(c\/)?([^\/]+)(\/videos)?$',
-            'path_must_not_match': ('/playlist', '/c/playlist'),
-            'qs_args': [],
-            'extract_key': ('path_regex', 1),
-            'example': 'https://www.youtube.com/SOMECHANNEL'
-        },
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL_ID: {
-            'scheme': 'https',
-            'domains': ('m.youtube.com', 'www.youtube.com'),
-            'path_regex': '^\/channel\/([^\/]+)(\/videos)?$',
-            'path_must_not_match': ('/playlist', '/c/playlist'),
-            'qs_args': [],
-            'extract_key': ('path_regex', 0),
-            'example': 'https://www.youtube.com/channel/CHANNELID'
-        },
-        Source.SOURCE_TYPE_YOUTUBE_PLAYLIST: {
-            'scheme': 'https',
-            'domains': ('m.youtube.com', 'www.youtube.com'),
-            'path_regex': '^\/(playlist|watch)$',
-            'path_must_not_match': (),
-            'qs_args': ('list',),
-            'extract_key': ('qs_args', 'list'),
-            'example': 'https://www.youtube.com/playlist?list=PLAYLISTID'
-        },
-    }
+    source_types = youtube_long_source_types
+    help_item = dict(YouTube_SourceType.choices)
+    help_texts = youtube_help.get('texts')
+    help_examples = youtube_help.get('examples')
+    validation_urls = youtube_validation_urls
     prepopulate_fields = {
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL: ('source_type', 'key', 'name', 'directory'),
-        Source.SOURCE_TYPE_YOUTUBE_CHANNEL_ID: ('source_type', 'key'),
-        Source.SOURCE_TYPE_YOUTUBE_PLAYLIST: ('source_type', 'key'),
+        Val(YouTube_SourceType.CHANNEL): ('source_type', 'key', 'name', 'directory'),
+        Val(YouTube_SourceType.CHANNEL_ID): ('source_type', 'key'),
+        Val(YouTube_SourceType.PLAYLIST): ('source_type', 'key'),
     }
 
     def __init__(self, *args, **kwargs):
@@ -258,7 +210,7 @@ class ValidateSourceView(FormView):
         # Perform extra validation on the URL, we need to extract the channel name or
         # playlist ID and check they are valid
         source_type = form.cleaned_data['source_type']
-        if source_type not in self.source_types.values():
+        if source_type not in YouTube_SourceType.values:
             form.add_error(
                 'source_type',
                 ValidationError(self.errors['invalid_source'])
@@ -286,22 +238,47 @@ class ValidateSourceView(FormView):
         url = reverse_lazy('sync:add-source')
         fields_to_populate = self.prepopulate_fields.get(self.source_type)
         fields = {}
+        value = self.key
+        use_channel_id = (
+            'youtube-channel' == self.source_type_str and
+            '@' == self.key[0]
+        )
+        if use_channel_id:
+            old_key = self.key
+            old_source_type = self.source_type
+            old_source_type_str = self.source_type_str
+
+            self.source_type_str = 'youtube-channel-id'
+            self.source_type = self.source_types.get(self.source_type_str, None)
+            index_url = Source.create_index_url(self.source_type, self.key, 'videos')
+            try:
+                self.key = youtube.get_channel_id(
+                    index_url.replace('/channel/', '/')
+                )
+            except youtube.YouTubeError as e:
+                # It did not work, revert to previous behavior
+                self.key = old_key
+                self.source_type = old_source_type
+                self.source_type_str = old_source_type_str
+
         for field in fields_to_populate:
             if field == 'source_type':
                 fields[field] = self.source_type
-            elif field in ('key', 'name', 'directory'):
+            elif field == 'key':
                 fields[field] = self.key
+            elif field in ('name', 'directory'):
+                fields[field] = value
         return append_uri_params(url, fields)
 
 
 class EditSourceMixin:
     model = Source
+    # manual ordering
     fields = ('source_type', 'key', 'name', 'directory', 'filter_text', 'filter_text_invert', 'filter_seconds', 'filter_seconds_min',
               'media_format', 'index_schedule', 'index_videos', 'index_streams', 'download_media', 'download_cap', 'delete_old_media',
-              'delete_removed_media', 'days_to_keep', 'source_resolution', 'source_vcodec',
-              'source_acodec', 'prefer_60fps', 'prefer_hdr', 'fallback', 'copy_channel_images',
-              'delete_removed_media', 'delete_files_on_disk', 'days_to_keep', 'source_resolution',
-              'source_vcodec', 'source_acodec', 'prefer_60fps', 'prefer_hdr', 'fallback', 'copy_channel_images',
+              'days_to_keep', 'source_resolution', 'source_vcodec', 'source_acodec',
+              'prefer_60fps', 'prefer_hdr', 'fallback',
+              'delete_removed_media', 'delete_files_on_disk', 'copy_channel_images',
               'copy_thumbnails', 'write_nfo', 'write_json', 'embed_metadata', 'embed_thumbnail',
               'enable_sponsorblock', 'sponsorblock_categories', 'write_subtitles',
               'auto_subtitles', 'sub_langs')
@@ -318,7 +295,7 @@ class EditSourceMixin:
         obj = form.save(commit=False)
         source_type = form.cleaned_data['media_format']
         example_media_file = obj.get_example_media_format()
-        
+
         if example_media_file == '':
             form.add_error(
                 'media_format',
@@ -355,7 +332,7 @@ class AddSourceView(EditSourceMixin, CreateView):
 
     def dispatch(self, request, *args, **kwargs):
         source_type = request.GET.get('source_type', '')
-        if source_type and source_type in Source.SOURCE_TYPES:
+        if source_type and source_type in YouTube_SourceType.values:
             self.prepopulated_data['source_type'] = source_type
         key = request.GET.get('key', '')
         if key:
@@ -437,15 +414,8 @@ class DeleteSourceView(DeleteView, FormMixin):
         delete_media = True if delete_media_val is not False else False
         if delete_media:
             source = self.get_object()
-            for media in Media.objects.filter(source=source):
-                if media.media_file:
-                    file_path = media.media_file.path
-                    matching_files = glob.glob(os.path.splitext(file_path)[0] + '.*')
-                    for file in matching_files:
-                        delete_file(file)
-            directory_path = source.directory_path
-            if os.path.exists(directory_path):
-                shutil.rmtree(directory_path, True)
+            directory_path = pathlib.Path(source.directory_path)
+            (directory_path / '.to_be_removed').touch(exist_ok=True)
         return super().post(request, *args, **kwargs)
 
     def get_success_url(self):
@@ -488,20 +458,15 @@ class MediaView(ListView):
         return super().dispatch(request, *args, **kwargs)
 
     def get_queryset(self):
+        q = Media.objects.all()
+
         if self.filter_source:
-            if self.show_skipped:
-                q = Media.objects.filter(source=self.filter_source)
-            elif self.only_skipped:
-                q = Media.objects.filter(Q(source=self.filter_source) & (Q(skip=True) | Q(manual_skip=True)))
-            else:
-                q = Media.objects.filter(Q(source=self.filter_source) & (Q(skip=False) & Q(manual_skip=False)))
-        else:
-            if self.show_skipped:
-                q = Media.objects.all()
-            elif self.only_skipped:
-                q = Media.objects.filter(Q(skip=True)|Q(manual_skip=True))
-            else:
-                q = Media.objects.filter(Q(skip=False)&Q(manual_skip=False))
+            q = q.filter(source=self.filter_source)
+        if self.only_skipped:
+            q = q.filter(Q(can_download=False) | Q(skip=True) | Q(manual_skip=True))
+        elif not self.show_skipped:
+            q = q.filter(Q(can_download=True) & Q(skip=False) & Q(manual_skip=False))
+
         return q.order_by('-published', '-created')
 
     def get_context_data(self, *args, **kwargs):
@@ -528,8 +493,9 @@ class MediaThumbView(DetailView):
 
     def get(self, request, *args, **kwargs):
         media = self.get_object()
-        if media.thumb:
-            thumb = open(media.thumb.path, 'rb').read()
+        if media.thumb_file_exists:
+            thumb_path = pathlib.Path(media.thumb.path)
+            thumb = thumb_path.read_bytes()
             content_type = 'image/jpeg' 
         else:
             # No thumbnail on disk, return a blank 1x1 gif
@@ -627,6 +593,9 @@ class MediaRedownloadView(FormView, SingleObjectMixin):
         self.object.downloaded_fps = None
         self.object.downloaded_hdr = False
         self.object.downloaded_filesize = None
+        # Mark it as not skipped
+        self.object.skip = False
+        self.object.manual_skip = False
         # Saving here will trigger the post_create signals to schedule new tasks
         self.object.save()
         return super().form_valid(form)
@@ -740,18 +709,18 @@ class MediaContent(DetailView):
                 pth = pth[1]
             else:
                 pth = pth[0]
-            
-            
+
+
             # build final path
             filepth = pathlib.Path(str(settings.DOWNLOAD_ROOT) + pth)
-            
+
             if filepth.exists():
                 # return file
                 response = FileResponse(open(filepth,'rb'))
                 return response
             else:
                 return HttpResponseNotFound()
-            
+
         else:
             headers = {
                 'Content-Type': self.object.content_type,
@@ -768,46 +737,134 @@ class TasksView(ListView):
 
     template_name = 'sync/tasks.html'
     context_object_name = 'tasks'
+    paginate_by = settings.TASKS_PER_PAGE
     messages = {
+        'filter': _('Viewing tasks filtered for source: <strong>{name}</strong>'),
         'reset': _('All tasks have been reset'),
     }
 
     def __init__(self, *args, **kwargs):
+        self.filter_source = None
         self.message = None
         super().__init__(*args, **kwargs)
 
     def dispatch(self, request, *args, **kwargs):
         message_key = request.GET.get('message', '')
         self.message = self.messages.get(message_key, '')
+        filter_by = request.GET.get('filter', '')
+        if filter_by:
+            try:
+                self.filter_source = Source.objects.get(pk=filter_by)
+            except Source.DoesNotExist:
+                self.filter_source = None
+            if not message_key or 'filter' == message_key:
+                message = self.messages.get('filter', '')
+                self.message = message.format(
+                    name=self.filter_source.name
+                )
+
         return super().dispatch(request, *args, **kwargs)
 
     def get_queryset(self):
-        return Task.objects.all().order_by('run_at')
+        qs = Task.objects.all()
+        if self.filter_source:
+            qs = qs.filter(queue=str(self.filter_source.pk))
+        order = getattr(settings,
+            'BACKGROUND_TASK_PRIORITY_ORDERING',
+            'DESC'
+        )
+        prefix = '-' if 'ASC' != order else ''
+        _priority = f'{prefix}priority'
+        return qs.order_by(
+            _priority,
+            'run_at',
+        )
 
     def get_context_data(self, *args, **kwargs):
         data = super().get_context_data(*args, **kwargs)
-        data['message'] = self.message
-        data['running'] = []
-        data['errors'] = []
-        data['scheduled'] = []
-        queryset = self.get_queryset()
         now = timezone.now()
-        for task in queryset:
+        qs = Task.objects.all()
+        errors_qs = qs.filter(attempts__gt=0, locked_by__isnull=True)
+        running_qs = qs.filter(locked_by__isnull=False)
+        scheduled_qs = qs.filter(locked_by__isnull=True)
+
+        # Add to context data from ListView
+        data['message'] = self.message
+        data['source'] = self.filter_source
+        data['running'] = list()
+        data['errors'] = list()
+        data['total_errors'] = errors_qs.count()
+        data['scheduled'] = list()
+        data['total_scheduled'] = scheduled_qs.count()
+
+        def add_to_task(task):
             obj, url = map_task_to_instance(task)
             if not obj:
-                # Orphaned task, ignore it (it will be deleted when it fires)
-                continue
+                return False
             setattr(task, 'instance', obj)
             setattr(task, 'url', url)
             setattr(task, 'run_now', task.run_at < now)
-            if task.locked_by_pid_running():
-                data['running'].append(task)
-            elif task.has_error():
+            if task.has_error():
                 error_message = get_error_message(task)
                 setattr(task, 'error_message', error_message)
+                return 'error'
+            return True
+                    
+        for task in running_qs:
+            # There was broken logic in `Task.objects.locked()`, work around it.
+            # With that broken logic, the tasks never resume properly.
+            # This check unlocks the tasks without a running process.
+            # `task.locked_by_pid_running()` returns:
+            # - `True`: locked and PID exists
+            # - `False`: locked and PID does not exist
+            # - `None`: not `locked_by`, so there was no PID to check
+            locked_by_pid_running = task.locked_by_pid_running()
+            if locked_by_pid_running is False:
+                task.locked_by = None
+                # do not wait for the task to expire
+                task.locked_at = None
+                task.save()
+            if locked_by_pid_running and add_to_task(task):
+                data['running'].append(task)
+
+        # show all the errors when they fit on one page
+        if (data['total_errors'] + len(data['running'])) < self.paginate_by:
+            for task in errors_qs:
+                if task in data['running']:
+                    continue
+                mapped = add_to_task(task)
+                if 'error' == mapped:
+                    data['errors'].append(task)
+                elif mapped:
+                    data['scheduled'].append(task)
+
+        for task in data['tasks']:
+            already_added = (
+                task in data['running'] or
+                task in data['errors'] or
+                task in data['scheduled']
+            )
+            if already_added:
+                continue
+            mapped = add_to_task(task)
+            if 'error' == mapped:
                 data['errors'].append(task)
-            else:
+            elif mapped:
                 data['scheduled'].append(task)
+
+        order = getattr(settings,
+            'BACKGROUND_TASK_PRIORITY_ORDERING',
+            'DESC'
+        )
+        sort_keys = (
+            # key, reverse
+            ('run_at', False),
+            ('priority', 'ASC' != order),
+            ('run_now', True),
+        )
+        data['errors'] = multi_key_sort(data['errors'], sort_keys, attr=True)
+        data['scheduled'] = multi_key_sort(data['scheduled'], sort_keys, attr=True)
+
         return data
 
 
@@ -837,14 +894,10 @@ class CompletedTasksView(ListView):
         return super().dispatch(request, *args, **kwargs)
 
     def get_queryset(self):
-        return CompletedTask.objects.all().order_by('-run_at')
-
-    def get_queryset(self):
+        qs = CompletedTask.objects.all()
         if self.filter_source:
-            q = CompletedTask.objects.filter(queue=str(self.filter_source.pk))
-        else:
-            q = CompletedTask.objects.all()
-        return q.order_by('-run_at')
+            qs = qs.filter(queue=str(self.filter_source.pk))
+        return qs.order_by('-run_at')
 
     def get_context_data(self, *args, **kwargs):
         data = super().get_context_data(*args, **kwargs)
@@ -853,11 +906,10 @@ class CompletedTasksView(ListView):
                 error_message = get_error_message(task)
                 setattr(task, 'error_message', error_message)
         data['message'] = ''
-        data['source'] = None
+        data['source'] = self.filter_source
         if self.filter_source:
             message = str(self.messages.get('filter', ''))
             data['message'] = message.format(name=self.filter_source.name)
-            data['source'] = self.filter_source
         return data
 
 
@@ -882,7 +934,7 @@ class ResetTasks(FormView):
                 str(source.pk),
                 repeat=source.index_schedule,
                 queue=str(source.pk),
-                priority=5,
+                priority=10,
                 verbose_name=verbose_name.format(source.name)
             )
             # This also chains down to call each Media objects .save() as well
@@ -901,6 +953,7 @@ class MediaServersView(ListView):
 
     template_name = 'sync/mediaservers.html'
     context_object_name = 'mediaservers'
+    types_object = MediaServerType
     messages = {
         'deleted': _('Your selected media server has been deleted.'),
     }
@@ -915,11 +968,12 @@ class MediaServersView(ListView):
         return super().dispatch(request, *args, **kwargs)
 
     def get_queryset(self):
-        return MediaServer.objects.all().order_by('host')
+        return MediaServer.objects.all().order_by('host', 'port')
 
     def get_context_data(self, *args, **kwargs):
         data = super().get_context_data(*args, **kwargs)
         data['message'] = self.message
+        data['media_server_types'] = self.types_object.members_list()
         return data
 
 
@@ -930,15 +984,9 @@ class AddMediaServerView(FormView):
     '''
 
     template_name = 'sync/mediaserver-add.html'
-    server_types = {
-        'plex': MediaServer.SERVER_TYPE_PLEX,
-    }
-    server_type_names = {
-        MediaServer.SERVER_TYPE_PLEX: _('Plex'),
-    }
-    forms = {
-        MediaServer.SERVER_TYPE_PLEX: PlexMediaServerForm,
-    }
+    server_types = MediaServerType.long_types()
+    server_type_names = dict(MediaServerType.choices)
+    forms = MediaServerType.forms_dict()
 
     def __init__(self, *args, **kwargs):
         self.server_type = None
@@ -952,6 +1000,8 @@ class AddMediaServerView(FormView):
         if not self.server_type:
             raise Http404
         self.form_class = self.forms.get(self.server_type)
+        if not self.form_class:
+            raise Http404
         self.model_class = MediaServer(server_type=self.server_type)
         return super().dispatch(request, *args, **kwargs)
 
@@ -993,6 +1043,7 @@ class AddMediaServerView(FormView):
     def get_context_data(self, *args, **kwargs):
         data = super().get_context_data(*args, **kwargs)
         data['server_type'] = self.server_type
+        data['server_type_long'] = self.server_types.get(self.server_type)
         data['server_type_name'] = self.server_type_names.get(self.server_type)
         data['server_help'] = self.model_class.get_help_html()
         return data
@@ -1053,9 +1104,7 @@ class UpdateMediaServerView(FormView, SingleObjectMixin):
 
     template_name = 'sync/mediaserver-update.html'
     model = MediaServer
-    forms = {
-        MediaServer.SERVER_TYPE_PLEX: PlexMediaServerForm,
-    }
+    forms = MediaServerType.forms_dict()
 
     def __init__(self, *args, **kwargs):
         self.object = None

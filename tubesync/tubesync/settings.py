@@ -1,5 +1,5 @@
-import os
 from pathlib import Path
+from common.utils import getenv
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -97,7 +97,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = os.getenv('TZ', 'UTC')
+TIME_ZONE = getenv('TZ', 'UTC')
 USE_I18N = True
 USE_L10N = True
 USE_TZ = True
@@ -119,6 +119,8 @@ Disallow: /
 '''.strip()
 
 
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 
@@ -133,7 +135,7 @@ HEALTHCHECK_ALLOWED_IPS = ('127.0.0.1',)
 
 
 MAX_ATTEMPTS = 15                           # Number of times tasks will be retried
-MAX_RUN_TIME = 1800                         # Maximum amount of time in seconds a task can run
+MAX_RUN_TIME = 1*(24*60*60)                 # Maximum amount of time in seconds a task can run
 BACKGROUND_TASK_RUN_ASYNC = True            # Run tasks async in the background
 BACKGROUND_TASK_ASYNC_THREADS = 1           # Number of async tasks to run at once
 MAX_BACKGROUND_TASK_ASYNC_THREADS = 8       # For sanity reasons
@@ -170,6 +172,7 @@ YOUTUBE_DEFAULTS = {
     'ignoreerrors': True,   # Skip on errors (such as unavailable videos in playlists)
     'cachedir': False,      # Disable on-disk caching
     'addmetadata': True,    # Embed metadata during postprocessing where available
+    'geo_verification_proxy': getenv('geo_verification_proxy').strip() or None,
 }
 COOKIES_FILE = CONFIG_BASE_DIR / 'cookies.txt'
 
@@ -177,12 +180,43 @@ COOKIES_FILE = CONFIG_BASE_DIR / 'cookies.txt'
 MEDIA_FORMATSTR_DEFAULT = '{yyyy_mm_dd}_{source}_{title}_{key}_{format}.{ext}'
 
 
+RENAME_ALL_SOURCES = False
+RENAME_SOURCES = None
+
+
+# WARNING WARNING WARNING
+# Below this line, the logic and formulas must remain as they are.
+# Changing them is very likely to break the software in weird ways.
+# To change anything, you should adjust a variable above or in the
+# 'local_settings.py' file instead.
+# You have been warned!
+
 try:
     from .local_settings import *
 except ImportError as e:
     import sys
     sys.stderr.write(f'Unable to import local_settings: {e}\n')
     sys.exit(1)
+
+
+try:
+    MAX_RUN_TIME = int(str(MAX_RUN_TIME), base=10)
+except:
+    # fall back to the default value from:
+    # https://github.com/django-background-tasks/django-background-tasks/blob/12c8f328e4ba704bd7d91534bb6569e70197b949/background_task/settings.py#L28
+    MAX_RUN_TIME = 3600
+
+# Tasks scheduled with `background_task` need a chance to finish
+if MAX_RUN_TIME < 600:
+    MAX_RUN_TIME = 600
+
+DOWNLOAD_MEDIA_DELAY = 60 + (MAX_RUN_TIME / 50)
+
+if RENAME_SOURCES or RENAME_ALL_SOURCES:
+    BACKGROUND_TASK_ASYNC_THREADS += 1
+
+if BACKGROUND_TASK_ASYNC_THREADS > MAX_BACKGROUND_TASK_ASYNC_THREADS:
+    BACKGROUND_TASK_ASYNC_THREADS = MAX_BACKGROUND_TASK_ASYNC_THREADS
 
 
 from .dbutils import patch_ensure_connection

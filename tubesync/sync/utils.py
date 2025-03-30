@@ -2,7 +2,7 @@ import os
 import re
 import math
 from copy import deepcopy
-from operator import itemgetter
+from operator import attrgetter, itemgetter
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 import requests
@@ -94,6 +94,20 @@ def resize_image_to_height(image, width, height):
     return image
 
 
+def glob_quote(filestr):
+    _glob_specials = {
+        '?': '[?]',
+        '*': '[*]',
+        '[': '[[]',
+        ']': '[]]', # probably not needed, but it won't hurt
+    }
+
+    if not isinstance(filestr, str):
+        raise TypeError(f'filestr must be a str, got "{type(filestr)}"')
+
+    return filestr.translate(str.maketrans(_glob_specials))
+
+
 def file_is_editable(filepath):
     '''
         Checks that a file exists and the file is in an allowed predefined tuple of
@@ -113,6 +127,23 @@ def file_is_editable(filepath):
         if str(allowed_path) == os.path.commonpath([allowed_path, filepath]):
             return True
     return False
+
+
+def directory_and_stem(arg_path):
+    filepath = Path(arg_path)
+    stem = Path(filepath.stem)
+    while stem.suffixes and '' != stem.suffix:
+        stem = Path(stem.stem)
+    stem = str(stem)
+    return (filepath.parent, stem,)
+
+
+def mkdir_p(arg_path, mode=0o777):
+    '''
+        Reminder: mode only affects the last directory
+    '''
+    dirpath = Path(arg_path)
+    return dirpath.mkdir(mode=mode, parents=True, exist_ok=True)
 
 
 def write_text_file(filepath, filedata):
@@ -148,10 +179,16 @@ def seconds_to_timestr(seconds):
    return '{:02d}:{:02d}:{:02d}'.format(hour, minutes, seconds)
 
 
-def multi_key_sort(sort_dict, specs, use_reversed=False):
-    result = list(sort_dict)
+def multi_key_sort(iterable, specs, /, use_reversed=False, *, item=False, attr=False, key_func=None):
+    result = list(iterable)
+    if key_func is None:
+        # itemgetter is the default
+        if item or not (item or attr):
+            key_func = itemgetter
+        elif attr:
+            key_func = attrgetter
     for key, reverse in reversed(specs):
-        result = sorted(result, key=itemgetter(key), reverse=reverse)
+        result.sort(key=key_func(key), reverse=reverse)
     if use_reversed:
         return list(reversed(result))
     return result
@@ -172,22 +209,39 @@ def normalize_codec(codec_str):
     return result
 
 
+def list_of_dictionaries(arg_list, arg_function=lambda x: x):
+    assert callable(arg_function)
+    if isinstance(arg_list, list):
+        def _call_func_with_dict(arg_dict):
+            if isinstance(arg_dict, dict):
+                return arg_function(arg_dict)
+            return arg_dict
+        return (True, list(map(_call_func_with_dict, arg_list)),)
+    return (False, arg_list,)
+
+
 def _url_keys(arg_dict, filter_func):
     result = {}
-    for key in arg_dict.keys():
-        if 'url' in key:
-            result.update(
-                {key: filter_func(key=key, url=arg_dict[key])}
-            )
+    if isinstance(arg_dict, dict):
+        for key, value in arg_dict.items():
+            if 'url' in key:
+                result.update(
+                    {key: filter_func(key=key, url=value)}
+                )
     return result
 
 
+# expects a dictionary where the value at key is a:
+# list of dictionaries 
 def _drop_url_keys(arg_dict, key, filter_func):
+    def _del_url_keys(_arg_dict):
+        for url_key, remove in _url_keys(_arg_dict, filter_func).items():
+            if remove is True:
+                del _arg_dict[url_key]
+
+    assert isinstance(arg_dict, dict)
     if key in arg_dict.keys():
-        for val_dict in arg_dict[key]:
-            for url_key, remove in _url_keys(val_dict, filter_func).items():
-                if remove is True:
-                    del val_dict[url_key]
+        list_of_dictionaries(arg_dict[key], _del_url_keys)
 
 
 def filter_response(arg_dict, copy_arg=False):
@@ -229,13 +283,15 @@ def filter_response(arg_dict, copy_arg=False):
         '__needs_testing',
         '__working',
     ))
-    for key in frozenset(('formats', 'requested_formats',)):
-        _drop_url_keys(response_dict, key, drop_format_url)
+    def del_drop_keys(arg_dict):
+        for drop_key in drop_keys:
+            if drop_key in arg_dict.keys():
+                del arg_dict[drop_key]
+
+    for key in ('formats', 'requested_formats',):
         if key in response_dict.keys():
-            for format in response_dict[key]:
-                for drop_key in drop_keys:
-                    if drop_key in format.keys():
-                        del format[drop_key]
+            _drop_url_keys(response_dict, key, drop_format_url)
+            list_of_dictionaries(response_dict[key], del_drop_keys)
     # end of formats cleanup }}}
 
     # beginning of subtitles cleanup {{{
@@ -251,12 +307,19 @@ def filter_response(arg_dict, copy_arg=False):
             )
         )
 
-    for key in frozenset(('subtitles', 'automatic_captions',)):
+    for key in ('subtitles', 'requested_subtitles', 'automatic_captions',):
         if key in response_dict.keys():
-            key_dict = response_dict[key]
-            for lang_code in key_dict:
-                _drop_url_keys(key_dict, lang_code, drop_subtitles_url)
+            lang_codes = response_dict[key]
+            if isinstance(lang_codes, dict):
+                for lang_code in lang_codes.keys():
+                    _drop_url_keys(lang_codes, lang_code, drop_subtitles_url)
     # end of subtitles cleanup }}}
+ 
+    # beginning of heatmap cleanup {{{
+    for key in ('heatmap',):
+        if key in response_dict.keys():
+            del response_dict[key]
+    # end of heatmap cleanup }}}
 
     return response_dict
 
@@ -301,10 +364,13 @@ def parse_media_format(format_dict):
             format_str = f'{height}P'
         else:
             format_str = None
+
     return {
         'id': format_dict.get('format_id', ''),
         'format': format_str,
+        'format_note': format_dict.get('format_note', ''),
         'format_verbose': format_dict.get('format', ''),
+        'language_code': format_dict.get('language', None),
         'height': height,
         'width': width,
         'vcodec': vcodec,
@@ -312,6 +378,7 @@ def parse_media_format(format_dict):
         'vbr': format_dict.get('tbr', 0),
         'acodec': acodec,
         'abr': format_dict.get('abr', 0),
+        'asr': format_dict.get('asr', 0),
         'is_60fps': fps > 50,
         'is_hdr': 'HDR' in format_dict.get('format', '').upper(),
         'is_hls': is_hls,

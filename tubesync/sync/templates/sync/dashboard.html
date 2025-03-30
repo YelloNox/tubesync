@@ -1,4 +1,4 @@
-{% extends 'base.html' %}{% load humanize %}  
+{% extends 'base.html' %}{% load humanize %}{% load filters %}
 
 {% block headtitle %}Dashboard{% endblock %}
 
@@ -24,9 +24,9 @@
     <div class="card dashcard">
       <a href="{% url 'sync:sources' %}">
         <div class="card-content">
-          <h3 class="truncate">{{ num_sources }}</h3>
+          <h3 class="truncate">{{ num_sources|intcomma }}</h3>
           <div class="desc truncate">source{{ num_sources|pluralize }}</div>
-          <div class="truncate"><strong>{{ num_video_sources }}</strong> video, <strong>{{ num_audio_sources }}</strong> audio</div>
+          <div class="truncate"><strong>{{ num_video_sources|intcomma }}</strong> video, <strong>{{ num_audio_sources|intcomma }}</strong> audio</div>
         </div>
       </a>
     </div>
@@ -35,9 +35,9 @@
     <div class="card dashcard">
       <a href="{% url 'sync:media' %}">
         <div class="card-content">
-          <h3 class="truncate">{{ num_media }}</h3>
+          <h3 class="truncate">{{ num_media|intcomma }}</h3>
           <div class="desc truncate">media item{{ num_media|pluralize }}</div>
-          <div class="truncate"><strong>{{ num_downloaded_media }}</strong> downloaded</div>
+          <div class="truncate"><strong>{{ num_downloaded_media|intcomma }}</strong> downloaded</div>
         </div>
       </a>
     </div>
@@ -46,9 +46,9 @@
     <div class="card dashcard">
       <a href="{% url 'sync:tasks' %}">
         <div class="card-content">
-          <h3 class="truncate">{{ num_tasks }}</h3>
+          <h3 class="truncate">{{ num_tasks|intcomma }}</h3>
           <div class="desc truncate">scheduled task{{ num_tasks|pluralize }}</div>
-          <div class="truncate"><strong>{{ num_completed_tasks }}</strong> completed</div>
+          <div class="truncate"><strong>{{ num_completed_tasks|intcomma }}</strong> completed</div>
         </div>
       </a>
     </div>
@@ -57,9 +57,9 @@
     <div class="card dashcard">
       <a href="{% url 'sync:media' %}">
         <div class="card-content">
-          <h3 class="truncate">{{ disk_usage_bytes|filesizeformat }}</h3>
+          <h3 class="truncate">{{ disk_usage_bytes|bytesformat }}</h3>
           <div class="desc truncate">{{ disk_usage_bytes|intcomma }} bytes</div>
-          <div class="truncate">Avg. <strong>{{ average_bytes_per_media|filesizeformat }}</strong> per media</div>
+          <div class="truncate">Avg. <strong>{{ average_bytes_per_media|bytesformat }}</strong> per media</div>
         </div>
       </a>
     </div>
@@ -89,7 +89,7 @@
           {% for media in largest_downloads %}
             <a href="{% url 'sync:media-item' pk=media.pk %}" class="collection-item">
               <div class="truncate">{{ media.name }}</div>
-              <div class="truncate"><strong>{{ media.downloaded_filesize|filesizeformat }}</strong>{% if media.downloaded_format %} in {{ media.downloaded_format }}{% endif %} from &quot;{{ media.source.name }}&quot;</div>
+              <div class="truncate"><strong>{{ media.downloaded_filesize|bytesformat }}</strong>{% if media.downloaded_format %} in {{ media.downloaded_format }}{% endif %} from &quot;{{ media.source.name }}&quot;</div>
             </a>
           {% empty %}
             <span class="collection-item">No media has been downloaded.</span>
@@ -125,7 +125,7 @@
       </tr>
       <tr title="Database connection used by TubeSync">
         <td class="hide-on-small-only">Database</td>
-        <td><span class="hide-on-med-and-up">Database<br></span><strong>{{ database_connection }}</strong></td>
+        <td><span class="hide-on-med-and-up">Database<br></span><strong>{{ database_connection }}{% if database_filesize %} ({{ database_filesize|bytesformat }}){% endif %}</strong></td>
       </tr>
     </table>
   </div>
