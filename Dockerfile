@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # check=error=true
 
-ARG FFMPEG_VERSION="N"
+ARG FFMPEG_DATE="autobuild-2025-03-30-14-16"
+ARG FFMPEG_VERSION="N-119074-gf47c8bca2c"
 
 ARG S6_VERSION="3.2.0.2"
 
@@ -62,7 +63,7 @@ ARG FFMPEG_CHECKSUM_AMD64="${SHA256_FFMPEG_AMD64}"
 ARG FFMPEG_CHECKSUM_ARM64="${SHA256_FFMPEG_ARM64}"
 
 ARG FFMPEG_FILE_SUMS="checksums.${CHECKSUM_ALGORITHM}"
-ARG FFMPEG_URL="https://github.com/yt-dlp/FFmpeg-Builds/releases/download/autobuild-${FFMPEG_DATE}"
+ARG FFMPEG_URL="https://github.com/yt-dlp/FFmpeg-Builds/releases/download/${FFMPEG_DATE}"
 
 ARG DESTDIR="/downloaded"
 ARG TARGETARCH
