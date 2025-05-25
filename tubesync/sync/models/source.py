@@ -74,7 +74,7 @@ class Source(db.models.Model):
     INDEX_URLS = dict(zip(
         YouTube_SourceType.values,
         (
-            'https://www.youtube.com/c/{key}/{type}',
+            'https://www.youtube.com/{key}/{type}',
             'https://www.youtube.com/channel/{key}/{type}',
             'https://www.youtube.com/playlist?list={key}',
         ),
