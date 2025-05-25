@@ -65,6 +65,7 @@ def get_remote_image(url, force_rgb=True):
                        '(KHTML, like Gecko) Chrome/69.0.3497.64 Safari/537.36')
     }
     r = requests.get(url, headers=headers, stream=True, timeout=60)
+    r.raise_for_status()
     r.raw.decode_content = True
     i = Image.open(r.raw)
     if force_rgb:
@@ -127,15 +128,6 @@ def file_is_editable(filepath):
         if str(allowed_path) == os.path.commonpath([allowed_path, filepath]):
             return True
     return False
-
-
-def directory_and_stem(arg_path):
-    filepath = Path(arg_path)
-    stem = Path(filepath.stem)
-    while stem.suffixes and '' != stem.suffix:
-        stem = Path(stem.stem)
-    stem = str(stem)
-    return (filepath.parent, stem,)
 
 
 def mkdir_p(arg_path, mode=0o777):

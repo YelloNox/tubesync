@@ -8,6 +8,7 @@ DOMAINS = dict({
     'youtube': frozenset({
         'youtube.com',
         'm.youtube.com',
+        'music.youtube.com',
         'www.youtube.com',
     }),
 })
@@ -158,6 +159,12 @@ class SponsorBlock_Category(models.TextChoices):
     FILLER = 'filler', _( 'Filler Tangent' )
     INTERACTION = 'interaction', _( 'Interaction Reminder' )
     MUSIC_OFFTOPIC = 'music_offtopic', _( 'Non-Music Section' )
+
+
+class TaskQueue(models.TextChoices):
+    DB = 'database', _('Database')
+    FS = 'filesystem', _('Filesystem')
+    NET = 'network', _('Networking')
 
 
 class YouTube_SourceType(models.TextChoices):

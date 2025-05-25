@@ -7,7 +7,7 @@ verify_ssl = true
 autopep8 = "*"
 
 [packages]
-django = "*"
+django = "~=5.2.1"
 django-sass-processor = {extras = ["management-command"], version = "*"}
 pillow = "*"
 whitenoise = "*"
@@ -24,3 +24,4 @@ yt-dlp = {extras = ["default", "curl-cffi"], version = "*"}
 emoji = "*"
 brotli = "*"
 html5lib = "*"
+bgutil-ytdlp-pot-provider = "*"

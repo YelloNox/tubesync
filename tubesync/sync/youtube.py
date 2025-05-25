@@ -6,7 +6,6 @@
 
 import os
 
-from collections import namedtuple
 from common.logger import log
 from copy import deepcopy
 from pathlib import Path
@@ -14,12 +13,13 @@ from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit, parse_qs
 
 from django.conf import settings
+from .choices import Val, FileExtension
 from .hooks import postprocessor_hook, progress_hook
 from .utils import mkdir_p
 import yt_dlp
 import yt_dlp.patch.check_thumbnails
 import yt_dlp.patch.fatal_http_errors
-from yt_dlp.utils import remove_end
+from yt_dlp.utils import remove_end, shell_quote, OUTTMPL_TYPES
 
 
 _defaults = getattr(settings, 'YOUTUBE_DEFAULTS', {})
@@ -101,7 +101,7 @@ def get_channel_image_info(url):
                     avatar_url = thumbnail['url']
                 if thumbnail['id'] == 'banner_uncropped':
                     banner_url = thumbnail['url']
-                if banner_url != None and avatar_url != None:
+                if banner_url is not None and avatar_url is not None:
                     break
 
             return avatar_url, banner_url
@@ -132,7 +132,7 @@ def _subscriber_only(msg='', response=None):
     return False
 
 
-def get_media_info(url, days=None):
+def get_media_info(url, /, *, days=None, info_json=None):
     '''
         Extracts information from a YouTube URL and returns it as a dict. For a channel
         or playlist this returns a dict of all the videos on the channel or playlist
@@ -142,13 +142,17 @@ def get_media_info(url, days=None):
     if days is not None:
         try:
             days = int(str(days), 10)
-        except Exception as e:
+        except (TypeError, ValueError):
             days = None
         start = (
             f'yesterday-{days!s}days' if days else None
         )
     opts = get_yt_opts()
-    paths = opts.get('paths', dict())
+    default_opts = yt_dlp.parse_options([]).options
+    class NoDefaultValue: pass # a unique Singleton, that may be checked for later
+    user_set = lambda k, d, default=NoDefaultValue: d[k] if k in d.keys() else default
+    default_paths = user_set('paths', default_opts.__dict__, dict())
+    paths = user_set('paths', opts, default_paths)
     if 'temp' in paths:
         temp_dir_obj = TemporaryDirectory(prefix='.yt_dlp-', dir=paths['temp'])
         temp_dir_path = Path(temp_dir_obj.name)
@@ -156,24 +160,59 @@ def get_media_info(url, days=None):
         paths.update({
             'temp': str(temp_dir_path),
         })
+    try:
+        info_json_path = Path(info_json).resolve(strict=False)
+    except (RuntimeError, TypeError):
+        pass
+    else:
+        paths.update({
+            'infojson': user_set('infojson', paths, str(info_json_path))
+        })
+    default_postprocessors = user_set('postprocessors', default_opts.__dict__, list())
+    postprocessors = user_set('postprocessors', opts, default_postprocessors)
+    postprocessors.append(dict(
+        key='Exec',
+        when='playlist',
+        exec_cmd="/usr/bin/env bash /app/full_playlist.sh '%(id)s' '%(playlist_count)d'",
+    ))
+    cache_directory_path = Path(user_set('cachedir', opts, '/dev/shm'))
+    playlist_infojson = 'postprocessor_[%(id)s]_%(n_entries)d_%(playlist_count)d_temp'
+    outtmpl = dict(
+        default='',
+        infojson='%(extractor)s/%(id)s.%(ext)s' if paths.get('infojson') else '',
+        pl_infojson=f'{cache_directory_path}/infojson/playlist/{playlist_infojson}.%(ext)s',
+    )
+    for k in OUTTMPL_TYPES.keys():
+        outtmpl.setdefault(k, '')
     opts.update({
         'ignoreerrors': False, # explicitly set this to catch exceptions
         'ignore_no_formats_error': False, # we must fail first to try again with this enabled
         'skip_download': True,
-        'simulate': True,
+        'simulate': False,
         'logger': log,
         'extract_flat': True,
+        'allow_playlist_files': True,
         'check_formats': True,
         'check_thumbnails': False,
+        'clean_infojson': False,
         'daterange': yt_dlp.utils.DateRange(start=start),
         'extractor_args': {
+            'youtube': {'formats': ['missing_pot']},
             'youtubetab': {'approximate_date': ['true']},
         },
+        'outtmpl': outtmpl,
+        'overwrites': True,
         'paths': paths,
+        'postprocessors': postprocessors,
         'skip_unavailable_fragments': False,
-        'sleep_interval_requests': 2 * settings.BACKGROUND_TASK_ASYNC_THREADS,
+        'sleep_interval_requests': 1,
         'verbose': True if settings.DEBUG else False,
+        'writeinfojson': True,
     })
+    if settings.BACKGROUND_TASK_RUN_ASYNC:
+        opts.update({
+            'sleep_interval_requests': 2 * settings.BACKGROUND_TASK_ASYNC_THREADS,
+        })
     if start:
         log.debug(f'get_media_info: used date range: {opts["daterange"]} for URL: {url}')
     response = {}
@@ -267,10 +306,41 @@ def download_media(
         ).options.sponsorblock_mark
         pp_opts.sponsorblock_remove.update(sponsor_categories or {})
 
+    # Enable audio extraction for audio-only extensions
+    audio_exts = set(Val(
+        FileExtension.M4A,
+        FileExtension.OGG,
+    ))
+    if extension in audio_exts:
+        pp_opts.extractaudio = True
+        pp_opts.nopostoverwrites = False
+        # The ExtractAudio post processor can change the extension.
+        # This post processor is to change the final filename back
+        # to what we are expecting it to be.
+        final_path = Path(output_file)
+        try:
+            final_path = final_path.resolve(strict=True)
+        except FileNotFoundError:
+            # This is very likely the common case
+            final_path = Path(output_file).resolve(strict=False)
+        expected_file = shell_quote(str(final_path))
+        cmds = pp_opts.exec_cmd.get('after_move', list())
+        cmds.append(
+            f'test -f {expected_file} || '
+            'mv -T -u -- %(filepath,_filename|)q '
+            f'{expected_file}'
+        )
+        # assignment is the quickest way to cover both 'get' cases
+        pp_opts.exec_cmd['after_move'] = cmds
+    elif '+' not in media_format:
+        pp_opts.remuxvideo = extension
+
     ytopts = {
         'format': media_format,
+        'final_ext': extension,
         'merge_output_format': extension,
         'outtmpl': os.path.basename(output_file),
+        'remuxvideo': pp_opts.remuxvideo,
         'quiet': False if settings.DEBUG else True,
         'verbose': True if settings.DEBUG else False,
         'noprogress': None if settings.DEBUG else True,
@@ -282,9 +352,10 @@ def download_media(
         'check_formats': None,
         'overwrites': None,
         'skip_unavailable_fragments': False,
-        'sleep_interval': 10 + int(settings.DOWNLOAD_MEDIA_DELAY / 20),
-        'max_sleep_interval': settings.DOWNLOAD_MEDIA_DELAY,
+        'sleep_interval': 10,
+        'max_sleep_interval': min(20*60, max(60, settings.DOWNLOAD_MEDIA_DELAY)),
         'sleep_interval_requests': 1 + (2 * settings.BACKGROUND_TASK_ASYNC_THREADS),
+        'extractor_args': opts.get('extractor_args', dict()),
         'paths': opts.get('paths', dict()),
         'postprocessor_args': opts.get('postprocessor_args', dict()),
         'postprocessor_hooks': opts.get('postprocessor_hooks', list()),
@@ -306,6 +377,18 @@ def download_media(
     ytopts['paths'].update({
         'home': str(output_dir),
         'temp': str(temp_dir_path),
+    })
+
+    # Allow download of formats that tested good with 'missing_pot'
+    youtube_ea_dict = ytopts['extractor_args'].get('youtube', dict())
+    formats_list = youtube_ea_dict.get('formats', list())
+    if 'missing_pot' not in formats_list:
+        formats_list.append('missing_pot')
+        youtube_ea_dict.update({
+            'formats': formats_list,
+        })
+    ytopts['extractor_args'].update({
+        'youtube': youtube_ea_dict,
     })
 
     postprocessor_hook_func = postprocessor_hook.get('function', None)
@@ -332,6 +415,15 @@ def download_media(
         ytopts['postprocessor_args'].update({
             'modifychapters+ffmpeg': codec_options,
         })
+
+    # Provide the user control of 'overwrites' in the post processors.
+    pp_opts.overwrites = opts.get(
+        'overwrites',
+        ytopts.get(
+            'overwrites',
+            default_opts.overwrites,
+        ),
+    )
 
     # Create the post processors list.
     # It already included user configured post processors as well.

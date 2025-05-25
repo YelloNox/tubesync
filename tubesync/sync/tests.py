@@ -6,7 +6,6 @@
 
 
 import logging
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,7 +19,7 @@ from .tasks import cleanup_old_media, check_source_directory_exists
 from .filtering import filter_media
 from .utils import filter_response
 from .choices import (Val, Fallback, IndexSchedule, SourceResolution,
-                        YouTube_AudioCodec, YouTube_VideoCodec,
+                        TaskQueue, YouTube_AudioCodec, YouTube_VideoCodec,
                         YouTube_SourceType, youtube_long_source_types)
 
 
@@ -138,7 +137,7 @@ class FrontEndTestCase(TestCase):
                     else:
                         # Invalid source tests should reload the page with an error
                         self.assertEqual(response.status_code, 200)
-                        self.assertIn('<ul class="errorlist">',
+                        self.assertIn('<ul class="errorlist"',
                                       response.content.decode())
 
     def test_add_source_prepopulation(self):
@@ -211,7 +210,7 @@ class FrontEndTestCase(TestCase):
         source_uuid = str(source.pk)
         task = Task.objects.get_task('sync.tasks.index_source_task',
                                      args=(source_uuid,))[0]
-        self.assertEqual(task.queue, source_uuid)
+        self.assertEqual(task.queue, Val(TaskQueue.NET))
         # Run the check_source_directory_exists task
         check_source_directory_exists.now(source_uuid)
         # Check the source is now on the source overview page
@@ -420,8 +419,7 @@ class FrontEndTestCase(TestCase):
         found_download_task1 = False
         found_download_task2 = False
         found_download_task3 = False
-        q = {'queue': str(test_source.pk),
-             'task_name': 'sync.tasks.download_media_thumbnail'}
+        q = {'task_name': 'sync.tasks.download_media_thumbnail'}
         for task in Task.objects.filter(**q):
             if test_media1_pk in task.task_params:
                 found_thumbnail_task1 = True
@@ -429,8 +427,7 @@ class FrontEndTestCase(TestCase):
                 found_thumbnail_task2 = True
             if test_media3_pk in task.task_params:
                 found_thumbnail_task3 = True
-        q = {'queue': str(test_source.pk),
-             'task_name': 'sync.tasks.download_media'}
+        q = {'task_name': 'sync.tasks.download_media'}
         for task in Task.objects.filter(**q):
             if test_media1_pk in task.task_params:
                 found_download_task1 = True
@@ -1824,13 +1821,13 @@ class TasksTestCase(TestCase):
 
         now = timezone.now()
 
-        m11 = Media.objects.create(source=src1, downloaded=True, key='a11', download_date=now - timedelta(days=5))
-        m12 = Media.objects.create(source=src1, downloaded=True, key='a12', download_date=now - timedelta(days=25))
-        m13 = Media.objects.create(source=src1, downloaded=False, key='a13')
+        m11 = Media.objects.create(source=src1, downloaded=True, key='a11', download_date=now - timedelta(days=5)) # noqa
+        m12 = Media.objects.create(source=src1, downloaded=True, key='a12', download_date=now - timedelta(days=25)) # noqa
+        m13 = Media.objects.create(source=src1, downloaded=False, key='a13') # noqa
 
-        m21 = Media.objects.create(source=src2, downloaded=True, key='a21', download_date=now - timedelta(days=5))
+        m21 = Media.objects.create(source=src2, downloaded=True, key='a21', download_date=now - timedelta(days=5)) # noqa
         m22 = Media.objects.create(source=src2, downloaded=True, key='a22', download_date=now - timedelta(days=25))
-        m23 = Media.objects.create(source=src2, downloaded=False, key='a23')
+        m23 = Media.objects.create(source=src2, downloaded=False, key='a23') # noqa
 
         self.assertEqual(src1.media_source.all().count(), 3)
         self.assertEqual(src2.media_source.all().count(), 3)
@@ -1838,5 +1835,6 @@ class TasksTestCase(TestCase):
         cleanup_old_media()
 
         self.assertEqual(src1.media_source.all().count(), 3)
-        self.assertEqual(src2.media_source.all().count(), 2)
+        self.assertEqual(src2.media_source.all().count(), 3)
         self.assertEqual(Media.objects.filter(pk=m22.pk).exists(), False)
+        self.assertEqual(Media.objects.filter(source=src2, key=m22.key, skip=True).exists(), True)
