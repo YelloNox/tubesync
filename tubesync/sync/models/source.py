@@ -43,17 +43,17 @@ class Source(db.models.Model):
     )
     embed_metadata = db.models.BooleanField(
         _('embed metadata'),
-        default=False,
+        default=True,
         help_text=_('Embed metadata from source into file'),
     )
     embed_thumbnail = db.models.BooleanField(
         _('embed thumbnail'),
-        default=False,
+        default=True,
         help_text=_('Embed thumbnail into the file'),
     )
     enable_sponsorblock = db.models.BooleanField(
         _('enable sponsorblock'),
-        default=True,
+        default=False,
         help_text=_('Use SponsorBlock?'),
     )
 
@@ -64,7 +64,7 @@ class Source(db.models.Model):
     URLS = dict(zip(
         YouTube_SourceType.values,
         (
-            'https://www.youtube.com/c/{key}',
+            'https://www.youtube.com/{key}',
             'https://www.youtube.com/channel/{key}',
             'https://www.youtube.com/playlist?list={key}',
         ),
@@ -216,7 +216,7 @@ class Source(db.models.Model):
     )
     delete_files_on_disk = db.models.BooleanField(
         _('delete files on disk'),
-        default=False,
+        default=True,
         help_text=_('Delete files on disk when they are removed from TubeSync'),
     )
     source_resolution = db.models.CharField(
@@ -232,7 +232,7 @@ class Source(db.models.Model):
         max_length=8,
         db_index=True,
         choices=YouTube_VideoCodec.choices,
-        default=YouTube_VideoCodec.VP9,
+        default=YouTube_VideoCodec.AV1,
         help_text=_('Source video codec, desired video encoding format to download (ignored if "resolution" is audio only)'),
     )
     source_acodec = db.models.CharField(
@@ -263,7 +263,7 @@ class Source(db.models.Model):
     )
     copy_channel_images = db.models.BooleanField(
         _('copy channel images'),
-        default=False,
+        default=True,
         help_text=_('Copy channel banner and avatar. These may be detected and used by some media servers'),
     )
     copy_thumbnails = db.models.BooleanField(
@@ -273,12 +273,12 @@ class Source(db.models.Model):
     )
     write_nfo = db.models.BooleanField(
         _('write nfo'),
-        default=False,
+        default=True,
         help_text=_('Write an NFO file in XML with the media info, these may be detected and used by some media servers'),
     )
     write_json = db.models.BooleanField(
         _('write json'),
-        default=False,
+        default=True,
         help_text=_('Write a JSON file with the media info, these may be detected and used by some media servers'),
     )
     has_failed = db.models.BooleanField(
