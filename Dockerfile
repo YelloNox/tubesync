@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 # check=error=true
 
-ARG FFMPEG_DATE="autobuild-2025-05-23-15-29"
-ARG FFMPEG_VERSION="N-119679-g8c509ba491"
+ARG FFMPEG_DATE="autobuild-2025-06-29-15-12"
+ARG FFMPEG_VERSION="N-120061-gcfd1f81e7d"
 
 ARG S6_VERSION="3.2.0.3"
 
