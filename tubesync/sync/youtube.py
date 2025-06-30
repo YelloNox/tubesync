@@ -7,6 +7,7 @@
 import os
 
 from common.logger import log
+from common.utils import mkdir_p
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,7 +16,6 @@ from urllib.parse import urlsplit, parse_qs
 from django.conf import settings
 from .choices import Val, FileExtension
 from .hooks import postprocessor_hook, progress_hook
-from .utils import mkdir_p
 import yt_dlp
 import yt_dlp.patch.check_thumbnails
 import yt_dlp.patch.fatal_http_errors
@@ -179,7 +179,7 @@ def get_media_info(url, /, *, days=None, info_json=None):
     playlist_infojson = 'postprocessor_[%(id)s]_%(n_entries)d_%(playlist_count)d_temp'
     outtmpl = dict(
         default='',
-        infojson='%(extractor)s/%(id)s.%(ext)s' if paths.get('infojson') else '',
+        infojson='%(extractor_key)s/%(id)s.%(ext)s' if paths.get('infojson') else '',
         pl_infojson=f'{cache_directory_path}/infojson/playlist/{playlist_infojson}.%(ext)s',
     )
     for k in OUTTMPL_TYPES.keys():
@@ -209,10 +209,6 @@ def get_media_info(url, /, *, days=None, info_json=None):
         'verbose': True if settings.DEBUG else False,
         'writeinfojson': True,
     })
-    if settings.BACKGROUND_TASK_RUN_ASYNC:
-        opts.update({
-            'sleep_interval_requests': 2 * settings.BACKGROUND_TASK_ASYNC_THREADS,
-        })
     if start:
         log.debug(f'get_media_info: used date range: {opts["daterange"]} for URL: {url}')
     response = {}
@@ -353,8 +349,8 @@ def download_media(
         'overwrites': None,
         'skip_unavailable_fragments': False,
         'sleep_interval': 10,
-        'max_sleep_interval': min(20*60, max(60, settings.DOWNLOAD_MEDIA_DELAY)),
-        'sleep_interval_requests': 1 + (2 * settings.BACKGROUND_TASK_ASYNC_THREADS),
+        'max_sleep_interval': min(15*60, max(60, settings.DOWNLOAD_MEDIA_DELAY)),
+        'sleep_interval_requests': 3,
         'extractor_args': opts.get('extractor_args', dict()),
         'paths': opts.get('paths', dict()),
         'postprocessor_args': opts.get('postprocessor_args', dict()),

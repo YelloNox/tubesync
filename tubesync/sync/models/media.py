@@ -17,15 +17,15 @@ from common.logger import log
 from common.errors import NoFormatException
 from common.json import JSONEncoder
 from common.utils import (
-    clean_filename, clean_emoji,
+    clean_filename, clean_emoji, directory_and_stem,
+    glob_quote, mkdir_p, seconds_to_timestr,
 )
 from ..youtube import (
     get_media_info as get_youtube_media_info,
     download_media as download_youtube_media,
 )
 from ..utils import (
-    seconds_to_timestr, parse_media_format, filter_response,
-    write_text_file, mkdir_p, glob_quote, multi_key_sort,
+    filter_response, parse_media_format, write_text_file,
 )
 from ..matching import (
     get_best_combined_format,
@@ -38,9 +38,10 @@ from ..choices import (
 from ._migrations import (
     media_file_storage, get_media_thumb_path, get_media_file_path,
 )
-from ._private import _srctype_dict, _nfo_element, directory_and_stem
+from ._private import _srctype_dict, _nfo_element
 from .media__tasks import (
-    download_checklist, download_finished, wait_for_premiere,
+    copy_thumbnail, download_checklist, download_finished,
+    refresh_formats, wait_for_premiere, write_nfo_file,
 )
 from .source import Source
 
@@ -541,6 +542,7 @@ class Media(models.Model):
         return {
             'yyyymmdd': dateobj.strftime('%Y%m%d'),
             'yyyy_mm_dd': dateobj.strftime('%Y-%m-%d'),
+            'yyyy_0mm_dd': dateobj.strftime('%Y-0%m-%d'),
             'yyyy': dateobj.strftime('%Y'),
             'mm': dateobj.strftime('%m'),
             'dd': dateobj.strftime('%d'),
@@ -566,7 +568,11 @@ class Media(models.Model):
 
     @property
     def has_metadata(self):
-        return self.metadata is not None
+        result = self.metadata is not None
+        if not result:
+            return False
+        value = self.get_metadata_first_value(('id', 'display_id', 'channel_id', 'uploader_id',))
+        return value is not None
 
 
     def metadata_clear(self, /, *, save=False):
@@ -600,8 +606,10 @@ class Media(models.Model):
             arg_dict=data,
         )
         md_model = self._meta.fields_map.get('new_metadata').related_model
-        md, created = md_model.objects.get_or_create(
-            media_id=self.pk,
+        md, created = md_model.objects.filter(
+            source__isnull=True,
+        ).get_or_create(
+            media=self,
             site=site,
             key=self.key,
         )
@@ -691,72 +699,6 @@ class Media(models.Model):
 
 
     @property
-    def refresh_formats(self):
-        if not self.has_metadata:
-            return
-        data = self.loaded_metadata
-        metadata_seconds = data.get('epoch', None)
-        if not metadata_seconds:
-            self.metadata = None
-            self.save(update_fields={'metadata'})
-            return False
-
-        now = timezone.now()
-        attempted_key = '_refresh_formats_attempted'
-        attempted_seconds = data.get(attempted_key)
-        if attempted_seconds:
-            # skip for recent unsuccessful refresh attempts also
-            attempted_dt = self.ts_to_dt(attempted_seconds)
-            if (now - attempted_dt) < timedelta(seconds=self.source.index_schedule):
-                return False
-        # skip for recent successful formats refresh
-        refreshed_key = 'formats_epoch'
-        formats_seconds = data.get(refreshed_key, metadata_seconds)
-        metadata_dt = self.ts_to_dt(formats_seconds)
-        if (now - metadata_dt) < timedelta(seconds=self.source.index_schedule):
-            return False
-
-        last_attempt = round((now - self.posix_epoch).total_seconds())
-        self.save_to_metadata(attempted_key, last_attempt)
-        self.skip = False
-        metadata = self.index_metadata()
-        if self.skip:
-            return False
-
-        response = metadata
-        if getattr(settings, 'SHRINK_NEW_MEDIA_METADATA', False):
-            response = filter_response(metadata, True)
-
-        # save the new list of thumbnails
-        thumbnails = self.get_metadata_first_value(
-            'thumbnails',
-            self.get_metadata_first_value('thumbnails', []),
-            arg_dict=response,
-        )
-        field = self.get_metadata_field('thumbnails')
-        self.save_to_metadata(field, thumbnails)
-
-        # select and save our best thumbnail url
-        try:
-            thumbnail = [ thumb.get('url') for thumb in multi_key_sort(
-                thumbnails,
-                [('preference', True,)],
-            ) if thumb.get('url', '').endswith('.jpg') ][0]
-        except IndexError:
-            pass
-        else:
-            field = self.get_metadata_field('thumbnail')
-            self.save_to_metadata(field, thumbnail)
-
-        field = self.get_metadata_field('formats')
-        self.save_to_metadata(field, response.get(field, []))
-        self.save_to_metadata(refreshed_key, response.get('epoch', formats_seconds))
-        if data.get('availability', 'public') != response.get('availability', 'public'):
-            self.save_to_metadata('availability', response.get('availability', 'public'))
-        return True
-
-
-    @property
     def url(self):
         url = self.URLS.get(self.source.source_type, '')
         return url.format(key=self.key)
@@ -781,8 +723,19 @@ class Media(models.Model):
 
     @property
     def slugtitle(self):
-        replaced = self.title.replace('_', '-').replace('&', 'and').replace('+', 'and')
-        return slugify(replaced)[:80]
+        transtab = str.maketrans({
+            '&': 'and', '+': 'and',
+        })
+        slugified = slugify(
+            self.title.translate(transtab),
+            allow_unicode=True,
+        )
+        encoding = os.sys.getfilesystemencoding()
+        decoded = slugified.encode(
+            encoding=encoding,
+            errors='ignore',
+        ).decode(encoding=encoding)
+        return decoded[:80]
 
     @property
     def thumbnail(self):
@@ -1156,6 +1109,7 @@ class Media(models.Model):
                 log.info(f'Collected {len(other_paths)} other paths for: {self!s}')
 
                 # adopt orphaned files, if possible
+                fuzzy_paths = list()
                 media_format = str(self.source.media_format)
                 top_dir_path = Path(self.source.directory_path)
                 if '{key}' in media_format:
@@ -1222,7 +1176,10 @@ class Media(models.Model):
 
 
 # add imported functions
+Media.copy_thumbnail = copy_thumbnail
 Media.download_checklist = download_checklist
 Media.download_finished = download_finished
+Media.refresh_formats = refresh_formats
 Media.wait_for_premiere = wait_for_premiere
+Media.write_nfo_file = write_nfo_file
 

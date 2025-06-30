@@ -259,21 +259,14 @@ and less common features:
  * [Sync or create missing metadata files](https://github.com/meeb/tubesync/blob/main/docs/create-missing-metadata.md)
  * [Reset tasks from the command line](https://github.com/meeb/tubesync/blob/main/docs/reset-tasks.md)
  * [Using PostgreSQL, MySQL or MariaDB as database backends](https://github.com/meeb/tubesync/blob/main/docs/other-database-backends.md)
+ * [YouTube Proof-of-Origin Tokens](https://github.com/meeb/tubesync/blob/main/docs/youtube-pot.md)
  * [Using cookies](https://github.com/meeb/tubesync/blob/main/docs/using-cookies.md)
  * [Reset metadata](https://github.com/meeb/tubesync/blob/main/docs/reset-metadata.md)
 
 
 # Warnings
 
-### 1. Automated file renaming
-> [!IMPORTANT]
-> Currently, file renaming is not enabled by default.
-> Enabling this feature by default is planned in an upcoming release, after `2025-006-01`.
-> 
-> To prevent your installation from scheduling media file renaming tasks,
-> you must set [`TUBESYNC_RENAME_ALL_SOURCES=False`](#advanced-configuration) in the environment variables or `RENAME_ALL_SOURCES = False` in [`settings.py`](../1fc0462c11741621350053144ab19cba5f266cb2/tubesync/tubesync/settings.py#L183).
-
-### 2. Index frequency
+### 1. Index frequency
 
 It's a good idea to add sources with as long of an index frequency as possible. This is
 the duration between indexes of the source. An index is when TubeSync checks to see
@@ -281,7 +274,7 @@ what videos available on a channel or playlist to find new media. Try and keep t
 long as possible, up to 24 hours.
 
 
-### 3. Indexing massive channels
+### 2. Indexing massive channels
 
 If you add a massive channel (one with several thousand videos) to TubeSync and choose "index
 every hour" or a similarly short interval; it's entirely possible that your TubeSync install may
@@ -291,11 +284,6 @@ downloading any media. Check your tasks for the status of your TubeSync install.
 **Be nice.** It's entirely possible that your IP address could get throttled and/or banned, by the
 source, if you try to crawl extremely large amounts quickly. **Try to be polite
 with the smallest amount of indexing and concurrent downloads possible for your needs.**
-
-Only, if you absolutely must, should you increase [`TUBESYNC_WORKERS`](#advanced-configuration) above its default value.
-The maximum the software accepts is `8` threads per queue worker process.
-By default, up to `3` tasks will be executing concurrently.
-The maximum is `24` concurrent tasks.
 
 # FAQ
 
@@ -407,7 +395,6 @@ useful if you are manually installing TubeSync in some other environment. These 
 | TUBESYNC_DIRECTORY_PREFIX    | Enable `video` and `audio` directory prefixes in `/downloads` | True                                                                          |
 | TUBESYNC_SHRINK_NEW          | Filter unneeded information from newly retrieved metadata     | True                                                                          |
 | TUBESYNC_SHRINK_OLD          | Filter unneeded information from metadata loaded from the database | True                                                                     |
-| TUBESYNC_WORKERS             | Number of background threads per (task runner) process. Default is 1. Max allowed is 8. | 2                                                  |
 | GUNICORN_WORKERS             | Number of `gunicorn` (web request) workers to spawn           | 3                                                                             |
 | LISTEN_HOST                  | IP address for `gunicorn` to listen on                        | 127.0.0.1                                                                     |
 | LISTEN_PORT                  | Port number for `gunicorn` to listen on                       | 8080                                                                          |

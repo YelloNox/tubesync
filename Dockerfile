@@ -4,11 +4,11 @@
 ARG FFMPEG_DATE="autobuild-2025-05-23-15-29"
 ARG FFMPEG_VERSION="N-119679-g8c509ba491"
 
-ARG S6_VERSION="3.2.0.2"
+ARG S6_VERSION="3.2.0.3"
 
-ARG SHA256_S6_AMD64="59289456ab1761e277bd456a95e737c06b03ede99158beb24f12b165a904f478"
-ARG SHA256_S6_ARM64="8b22a2eaca4bf0b27a43d36e65c89d2701738f628d1abd0cea5569619f66f785"
-ARG SHA256_S6_NOARCH="6dbcde158a3e78b9bb141d7bcb5ccb421e563523babbe2c64470e76f4fd02dae"
+ARG SHA256_S6_AMD64="01eb9a6dce10b5428655974f1903f48e7ba7074506dfb262e85ffab64a5498f2"
+ARG SHA256_S6_ARM64="3a078ef3720a6f16cc93fbd748bdf1b17c9e9ff4ead67947e9565d93379d4168"
+ARG SHA256_S6_NOARCH="ca79e39c9fea1ccfb6857a0eb13df7e7e12bc1b09454c4158b4075ade5a870ee"
 
 ARG ALPINE_VERSION="latest"
 ARG DEBIAN_VERSION="bookworm-slim"
@@ -26,6 +26,7 @@ ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND="noninteractive" \
     APT_KEEP_ARCHIVES=1 \
+    EDITOR="editor" \
     HOME="/root" \
     LANGUAGE="en_US.UTF-8" \
     LANG="en_US.UTF-8" \
@@ -58,6 +59,8 @@ RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/va
     apt-get -y autopurge && \
     apt-get -y autoclean && \
     rm -f /var/cache/debconf/*.dat-old
+
+FROM ghcr.io/astral-sh/uv:latest AS uv-binaries
 
 FROM alpine:${ALPINE_VERSION} AS openresty-debian
 ARG TARGETARCH
@@ -280,6 +283,9 @@ RUN set -eu ; \
 FROM scratch AS s6-overlay
 COPY --from=s6-overlay-extracted /s6-overlay-rootfs /
 
+FROM tubesync-base AS tubesync-uv
+COPY --from=uv-binaries /uv /uvx /usr/local/bin/
+
 FROM tubesync-base AS tubesync-openresty
 
 COPY --from=openresty-debian \
@@ -291,7 +297,10 @@ RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/va
     --mount=type=cache,id=apt-cache-cache,sharing=private,target=/var/cache/apt \
   set -x && \
   apt-get update && \
-  apt-get -y --no-install-recommends install nginx-common openresty && \
+  apt-get -y --no-install-recommends install \
+    nginx-common \
+    openresty \
+  && \
   # Clean up
   apt-get -y autopurge && \
   apt-get -y autoclean && \
@@ -303,7 +312,10 @@ RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/va
     --mount=type=cache,id=apt-cache-cache,sharing=private,target=/var/cache/apt \
   set -x && \
   apt-get update && \
-  apt-get -y --no-install-recommends install nginx-light && \
+  apt-get -y --no-install-recommends install \
+    nginx-light \
+    libnginx-mod-http-lua \
+  && \
   # openresty binary should still work
   ln -v -s -T ../sbin/nginx /usr/bin/openresty && \
   # Clean up
@@ -311,6 +323,8 @@ RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/va
   apt-get -y autoclean && \
   rm -v -f /var/cache/debconf/*.dat-old
 
+# The preference for openresty over nginx,
+# is for the newer version.
 FROM tubesync-openresty AS tubesync
 
 ARG S6_VERSION
@@ -332,21 +346,31 @@ RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/va
   # Install dependencies we keep
   # Install required distro packages
   apt-get -y --no-install-recommends install \
-  libjpeg62-turbo \
   libmariadb3 \
-  libpq5 \
-  libwebp7 \
-  pipenv \
+  libonig5 \
   pkgconf \
   python3 \
   python3-libsass \
+  python3-pip-whl \
   python3-socks \
-  python3-wheel \
   curl \
+  indent \
   less \
+  lua-lpeg \
+  tre-agrep \
+  vis \
+  xxd \
   && \
   # Link to the current python3 version
   ln -v -s -f -T "$(find /usr/local/lib -name 'python3.[0-9]*' -type d -printf '%P\n' | sort -r -V | head -n 1)" /usr/local/lib/python3 && \
+  # Configure the editor alternatives
+  touch /usr/local/bin/babi /bin/nano /usr/bin/vim.tiny && \
+  update-alternatives --install /usr/bin/editor editor /usr/local/bin/babi 50 && \
+  update-alternatives --install /usr/local/bin/nano nano /bin/nano 10 && \
+  update-alternatives --install /usr/local/bin/nano nano /usr/local/bin/babi 20 && \
+  update-alternatives --install /usr/local/bin/vim vim /usr/bin/vim.tiny 15 && \
+  update-alternatives --install /usr/local/bin/vim vim /usr/bin/vis 35 && \
+  rm -v /usr/local/bin/babi /bin/nano /usr/bin/vim.tiny && \
   # Create a 'app' user which the application will run as
   groupadd app && \
   useradd -M -d /app -s /bin/false -g app app && \
@@ -384,9 +408,11 @@ ARG YTDLP_DATE
 
 # Set up the app
 RUN --mount=type=tmpfs,target=/cache \
+    --mount=type=cache,id=uv-cache,sharing=locked,target=/cache/uv \
     --mount=type=cache,id=pipenv-cache,sharing=locked,target=/cache/pipenv \
     --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/var/lib/apt \
     --mount=type=cache,id=apt-cache-cache,sharing=private,target=/var/cache/apt \
+    --mount=type=bind,source=/uv,target=/usr/local/bin/uv,from=uv-binaries \
     --mount=type=bind,source=Pipfile,target=/app/Pipfile \
   set -x && \
   apt-get update && \
@@ -396,21 +422,38 @@ RUN --mount=type=tmpfs,target=/cache \
   g++ \
   gcc \
   libjpeg-dev \
+  libonig-dev \
   libpq-dev \
   libwebp-dev \
   make \
   postgresql-common \
   python3-dev \
-  python3-pip \
   zlib1g-dev \
   && \
   # Install non-distro packages
-  cp -at /tmp/ "${HOME}" && \
-  HOME="/tmp/${HOME#/}" \
+  mkdir -v -p /cache/.home-directories && \
+  cp -at /cache/.home-directories/ "${HOME}" && \
+  HOME="/cache/.home-directories/${HOME#/}" \
   XDG_CACHE_HOME='/cache' \
   PIPENV_VERBOSITY=64 \
   PYTHONPYCACHEPREFIX=/cache/pycache \
-    pipenv install --system --skip-lock && \
+  uv tool run --no-config --no-progress --no-managed-python -- \
+    pipenv lock && \
+  HOME="/cache/.home-directories/${HOME#/}" \
+  XDG_CACHE_HOME='/cache' \
+  PIPENV_VERBOSITY=1 \
+  PYTHONPYCACHEPREFIX=/cache/pycache \
+  uv tool run --no-config --no-progress --no-managed-python -- \
+    pipenv requirements --from-pipfile --hash >| /cache/requirements.txt && \
+  rm -v Pipfile.lock && \
+  cat -v /cache/requirements.txt && \
+  HOME="/cache/.home-directories/${HOME#/}" \
+  UV_LINK_MODE='copy' \
+  XDG_CACHE_HOME='/cache' \
+  PYTHONPYCACHEPREFIX=/cache/pycache \
+    uv --no-config --no-progress --no-managed-python \
+    pip install --strict --system --break-system-packages \
+    --requirements /cache/requirements.txt && \
   # remove the getpot_bgutil_script plugin
   find /usr/local/lib \
   -name 'getpot_bgutil_script.py' \
@@ -423,18 +466,31 @@ RUN --mount=type=tmpfs,target=/cache \
   g++ \
   gcc \
   libjpeg-dev \
+  libonig-dev \
   libpq-dev \
   libwebp-dev \
   make \
   postgresql-common \
   python3-dev \
-  python3-pip \
   zlib1g-dev \
   && \
   apt-get -y autopurge && \
   apt-get -y autoclean && \
+  LD_LIBRARY_PATH=/usr/local/lib/python3/dist-packages/pillow.libs:/usr/local/lib/python3/dist-packages/psycopg_binary.libs \
+    find /usr/local/lib/python3/dist-packages/ \
+      -name '*.so*' -print \
+      -exec du -h '{}' ';' \
+      -exec ldd '{}' ';' \
+    >| /cache/python-shared-objects 2>&1 && \
   rm -v -f /var/cache/debconf/*.dat-old && \
-  rm -v -rf /tmp/*
+  rm -v -rf /tmp/* ; \
+  if grep >/dev/null -Fe ' => not found' /cache/python-shared-objects ; \
+  then \
+      cat -v /cache/python-shared-objects ; \
+      printf -- 1>&2 '%s\n' \
+        ERROR: '    An unresolved shared object was found.' ; \
+      exit 1 ; \
+  fi
 
 # Copy root
 COPY config/root /
@@ -454,13 +510,14 @@ COPY tubesync/tubesync/local_settings.py.container /app/tubesync/local_settings.
 # Build app
 RUN set -x && \
   # Make absolutely sure we didn't accidentally bundle a SQLite dev database
-  rm -rf /app/db.sqlite3 && \
+  test '!' -e /app/db.sqlite3 && \
   # Run any required app commands
   /usr/bin/python3 -B /app/manage.py compilescss && \
   /usr/bin/python3 -B /app/manage.py collectstatic --no-input --link && \
+  rm -rf /config /downloads /run/app && \
   # Create config, downloads and run dirs
   mkdir -v -p /run/app && \
-  mkdir -v -p /config/media && \
+  mkdir -v -p /config/media /config/tasks && \
   mkdir -v -p /config/cache/pycache && \
   mkdir -v -p /downloads/audio && \
   mkdir -v -p /downloads/video && \
@@ -478,7 +535,9 @@ HEALTHCHECK --interval=1m --timeout=10s --start-period=3m CMD ["/app/healthcheck
 ENV PYTHONPATH="/app" \
     PYTHONPYCACHEPREFIX="/config/cache/pycache" \
     S6_CMD_WAIT_FOR_SERVICES_MAXTIME="0" \
-    XDG_CACHE_HOME="/config/cache"
+    XDG_CACHE_HOME="/config/cache" \
+    XDG_CONFIG_HOME="/config/tubesync" \
+    XDG_STATE_HOME="/config/state"
 EXPOSE 4848
 
 # Volumes

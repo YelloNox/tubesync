@@ -20,13 +20,15 @@ from django.utils._os import safe_join
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from common.timestamp import timestamp_to_datetime
-from common.utils import append_uri_params
+from common.utils import append_uri_params, mkdir_p, multi_key_sort
 from background_task.models import Task, CompletedTask
+from django_huey import DJANGO_HUEY
+from common.huey import h_q_reset_tasks
 from .models import Source, Media, MediaServer
 from .forms import (ValidateSourceForm, ConfirmDeleteSourceForm, RedownloadMediaForm,
                     SkipMediaForm, EnableMediaForm, ResetTasksForm, ScheduleTaskForm,
-                    ConfirmDeleteMediaServerForm)
-from .utils import validate_url, delete_file, multi_key_sort, mkdir_p
+                    ConfirmDeleteMediaServerForm, SourceForm)
+from .utils import delete_file, validate_url
 from .tasks import (map_task_to_instance, get_error_message,
                     get_source_completed_tasks, get_media_download_task,
                     delete_task_by_media, index_source_task,
@@ -276,15 +278,7 @@ class ValidateSourceView(FormView):
 
 class EditSourceMixin:
     model = Source
-    # manual ordering
-    fields = ('source_type', 'key', 'name', 'directory', 'filter_text', 'filter_text_invert', 'filter_seconds', 'filter_seconds_min',
-              'media_format', 'index_schedule', 'index_videos', 'index_streams', 'download_media', 'download_cap', 'delete_old_media',
-              'days_to_keep', 'source_resolution', 'source_vcodec', 'source_acodec',
-              'prefer_60fps', 'prefer_hdr', 'fallback',
-              'delete_removed_media', 'delete_files_on_disk', 'copy_channel_images',
-              'copy_thumbnails', 'write_nfo', 'write_json', 'embed_metadata', 'embed_thumbnail',
-              'enable_sponsorblock', 'sponsorblock_categories', 'write_subtitles',
-              'auto_subtitles', 'sub_langs')
+    form_class = SourceForm
     errors = {
         'invalid_media_format': _('Invalid media format, the media format contains '
                                   'errors or is empty. Check the table at the end of '
@@ -357,6 +351,9 @@ class AddSourceView(EditSourceMixin, CreateView):
 
     def get_initial(self):
         initial = super().get_initial()
+        initial['target_schedule'] = timezone.now().replace(
+            second=0, microsecond=0,
+        )
         for k, v in self.prepopulated_data.items():
             initial[k] = v
         return initial
@@ -402,6 +399,12 @@ class SourceView(DetailView):
 class UpdateSourceView(EditSourceMixin, UpdateView):
 
     template_name = 'sync/source-update.html'
+
+    def get_initial(self):
+        initial = super().get_initial()
+        when = getattr(self.object, 'target_schedule') or timezone.now()
+        initial['target_schedule'] = when.replace(second=0, microsecond=0)
+        return initial
 
     def get_success_url(self):
         url = reverse_lazy('sync:source', kwargs={'pk': self.object.pk})
@@ -860,6 +863,7 @@ class TasksView(ListView):
         data['scheduled'] = list()
         data['total_scheduled'] = scheduled_qs.count()
         data['migrated'] = migrate_queues()
+        data['wait_for_database_queue'] = False
 
         def add_to_task(task):
             obj, url = map_task_to_instance(task)
@@ -890,6 +894,8 @@ class TasksView(ListView):
                 task.save()
             if locked_by_pid_running and add_to_task(task):
                 data['running'].append(task)
+            elif locked_by_pid_running and 'wait_for_database_queue' in task.task_name:
+                data['wait_for_database_queue'] = True
 
         # show all the errors when they fit on one page
         if (data['total_errors'] + len(data['running'])) < self.paginate_by:
@@ -991,20 +997,11 @@ class ResetTasks(FormView):
     def form_valid(self, form):
         # Delete all tasks
         Task.objects.all().delete()
+        for queue_name in (DJANGO_HUEY or {}).get('queues', {}):
+            h_q_reset_tasks(queue_name)
         # Iter all tasks
         for source in Source.objects.all():
-            verbose_name = _('Check download directory exists for source "{}"')
-            check_source_directory_exists(
-                str(source.pk),
-                verbose_name=verbose_name.format(source.name),
-            )
-            # Recreate the initial indexing task
-            verbose_name = _('Index media from source "{}"')
-            index_source_task(
-                str(source.pk),
-                repeat=source.index_schedule,
-                verbose_name=verbose_name.format(source.name)
-            )
+            check_source_directory_exists(str(source.pk))
             # This also chains down to call each Media objects .save() as well
             source.save()
         return super().form_valid(form)
