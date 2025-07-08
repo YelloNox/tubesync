@@ -6,18 +6,23 @@ from django.db import IntegrityError
 from django.db.models.signals import pre_save, post_save, pre_delete, post_delete
 from django.db.transaction import atomic, on_commit
 from django.dispatch import receiver
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-from background_task.signals import task_failed
+from background_task.signals import (
+    task_created, task_started, task_successful, task_rescheduled, task_failed,
+)
 from background_task.models import Task
 from common.logger import log
+from common.models import TaskHistory
 from common.utils import glob_quote, mkdir_p
 from .models import Source, Media, Metadata
 from .tasks import (
-    map_task_to_instance, rename_media, save_all_media_for_source,
-    delete_task_by_source, delete_task_by_media, delete_all_media_for_source,
+    delete_task_by_media, delete_task_by_source,
+    get_media_download_task, get_media_metadata_task, get_media_thumbnail_task,
+    map_task_to_instance,
+    delete_all_media_for_source, rename_media, save_all_media_for_source,
     check_source_directory_exists, download_source_images, index_source_task,
     download_media, download_media_metadata, download_media_thumbnail,
-    get_media_download_task, get_media_metadata_task, get_media_thumbnail_task,
 )
 from .utils import delete_file
 from .filtering import filter_media
@@ -120,10 +125,14 @@ def source_post_save(sender, instance, created, **kwargs):
                 verbose_name=verbose_name.format(instance.name),
             )
 
-    verbose_name = _('Checking all media for source "{}"')
-    save_all_media_for_source(
-        str(instance.pk),
-        verbose_name=verbose_name.format(instance.name),
+    source = instance
+    TaskHistory.schedule(
+        save_all_media_for_source,
+        str(source.pk),
+        vn_fmt = _('Checking all media for "{}"'),
+        vn_args=(
+            source.name,
+        ),
     )
 
 
@@ -137,22 +146,22 @@ def source_pre_delete(sender, instance, **kwargs):
     log.info(f'Deleting tasks for source: {instance.name}')
     delete_task_by_source('sync.tasks.index_source_task', instance.pk)
     delete_task_by_source('sync.tasks.rename_all_media_for_source', instance.pk)
-    delete_task_by_source('sync.tasks.save_all_media_for_source', instance.pk)
 
     # Fetch the media source
     sqs = Source.objects.filter(filter_text=str(source.pk))
     if sqs.count():
         media_source = sqs[0]
         # Schedule deletion of media
-        delete_task_by_source('sync.tasks.delete_all_media_for_source', media_source.pk)
-        verbose_name = _('Deleting all media for source "{}"')
         on_commit(partial(
+            TaskHistory.schedule,
             delete_all_media_for_source,
             str(media_source.pk),
             str(media_source.name),
             str(media_source.directory_path),
-            priority=1,
-            verbose_name=verbose_name.format(media_source.name),
+            vn_fmt = _('Deleting all media for source "{}"'),
+            vn_args=(
+                media_source.name,
+            ),
         ))
 
 
@@ -163,13 +172,106 @@ def source_post_delete(sender, instance, **kwargs):
     log.info(f'Deleting tasks for removed source: {source.name}')
     delete_task_by_source('sync.tasks.index_source_task', instance.pk)
     delete_task_by_source('sync.tasks.rename_all_media_for_source', instance.pk)
-    delete_task_by_source('sync.tasks.save_all_media_for_source', instance.pk)
 
 
-@receiver(task_failed, sender=Task)
+@receiver(task_created, dispatch_uid='sync.signals.task_task_created')
+@atomic(durable=False)
+def task_task_created(sender, task=None, **kwargs):
+    if task is None:
+        return
+    task_obj = task
+    th, created = TaskHistory.objects.get_or_create(
+        task_id=str(task_obj.pk),
+        name=task_obj.task_name,
+        queue=task_obj.queue,
+    )
+    th.scheduled_at = task_obj.run_at
+    th.priority = (100 - task_obj.priority)
+    th.repeat = task_obj.repeat
+    th.repeat_until = task_obj.repeat_until
+    th.task_params = list(task_obj.params())
+    th.verbose_name = task_obj.verbose_name
+    th.save()
+    if created:
+        log.debug(f'Created a new task history record: {th.pk}: {th.verbose_name}')
+
+
+@receiver(task_started, dispatch_uid='sync.signals.task_task_started')
+@atomic(durable=False)
+def task_task_started(sender, **kwargs):
+    locked_tasks = Task.objects.locked(timezone.now())
+    for task_obj in locked_tasks:
+        th, created = TaskHistory.objects.get_or_create(
+            task_id=str(task_obj.pk),
+            name=task_obj.task_name,
+            queue=task_obj.queue,
+        )
+        th.attempts += 1
+        th.end_at = task_obj.locked_at
+        th.priority = (100 - task_obj.priority)
+        th.repeat = task_obj.repeat
+        th.repeat_until = task_obj.repeat_until
+        th.start_at = task_obj.locked_at
+        th.task_params = list(task_obj.params())
+        th.verbose_name = task_obj.verbose_name
+        th.save()
+        if created:
+            log.debug(f'Started a new task history record: {th.pk}: {th.verbose_name}')
+
+
+@receiver(task_rescheduled, dispatch_uid='sync.signals.task_task_rescheduled')
+@atomic(durable=False)
+def task_task_rescheduled(sender, task=None, **kwargs):
+    if task is None:
+        return
+    now_dt = timezone.now()
+    task_obj = task
+    th, created = TaskHistory.objects.get_or_create(
+        task_id=str(task_obj.pk),
+        name=task_obj.task_name,
+        queue=task_obj.queue,
+    )
+    th.elapsed += (
+        now_dt - task_obj.locked_at
+    ).total_seconds()
+    th.end_at = now_dt
+    th.scheduled_at = task_obj.run_at
+    th.start_at = task_obj.locked_at
+    th.save()
+    if created:
+        log.debug(f'Rescheduled a new task history record: {th.pk}: {th.verbose_name}')
+
+def merge_completed_task_into_history(task_id, task_obj):
+    th, created = TaskHistory.objects.get_or_create(
+        task_id=str(task_id),
+        name=task_obj.task_name,
+        queue=task_obj.queue,
+    )
+    th.elapsed += (
+        (task_obj.failed_at or task_obj.run_at) - task_obj.locked_at
+    ).total_seconds()
+    th.end_at = task_obj.run_at
+    th.failed_at = task_obj.failed_at
+    th.last_error = task_obj.last_error
+    th.repeat = task_obj.repeat
+    th.repeat_until = task_obj.repeat_until
+    th.start_at = task_obj.locked_at
+    th.verbose_name = task_obj.verbose_name
+    th.save()
+
+
+@receiver(task_successful, dispatch_uid='sync.signals.task_task_successful')
+@atomic(durable=False)
+def task_task_successful(sender, task_id, completed_task, **kwargs):
+    merge_completed_task_into_history(task_id, completed_task)
+
+
+@receiver(task_failed, dispatch_uid='sync.signals.task_task_failed')
+@atomic(durable=False)
 def task_task_failed(sender, task_id, completed_task, **kwargs):
+    merge_completed_task_into_history(task_id, completed_task)
     # Triggered after a task fails by reaching its max retry attempts
-    obj, url = map_task_to_instance(completed_task)
+    obj, url = map_task_to_instance(completed_task, using_history=False)
     if isinstance(obj, Source):
         log.error(f'Permanent failure for source: {obj} task: {completed_task}')
         obj.has_failed = True
@@ -283,7 +385,6 @@ def media_pre_delete(sender, instance, **kwargs):
     log.info(f'Deleting tasks for media: {instance.name}')
     delete_task_by_media('sync.tasks.download_media', (str(instance.pk),))
     delete_task_by_media('sync.tasks.download_media_metadata', (str(instance.pk),))
-    delete_task_by_media('sync.tasks.wait_for_media_premiere', (str(instance.pk),))
     thumbnail_url = instance.thumbnail
     if thumbnail_url:
         delete_task_by_media(
