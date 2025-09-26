@@ -41,7 +41,7 @@ from ._migrations import (
 from ._private import _srctype_dict, _nfo_element
 from .media__tasks import (
     copy_thumbnail, download_checklist, download_finished,
-    refresh_formats, wait_for_premiere, write_nfo_file,
+    failed_format, refresh_formats, wait_for_premiere, write_nfo_file,
 )
 from .source import Source
 
@@ -996,7 +996,12 @@ class Media(models.Model):
         if self.downloaded:
             return Val(MediaState.DOWNLOADED)
         if task:
-            if task.locked_by_pid_running():
+            def running(arg_task, /):
+                if hasattr(arg_task, 'locked_by_pid_running'):
+                    return arg_task.locked_by_pid_running()
+                from ..tasks import get_media_download_task
+                return get_media_download_task(str(self.pk))
+            if running(task):
                 return Val(MediaState.DOWNLOADING)
             elif task.has_error():
                 return Val(MediaState.ERROR)
@@ -1146,6 +1151,8 @@ class Media(models.Model):
                             other_path.replace(new_file_path)
 
                     for fuzzy_path in fuzzy_paths:
+                        if not fuzzy_path.exists():
+                            continue
                         (fuzzy_prefix_path, fuzzy_stem) = directory_and_stem(fuzzy_path, True)
                         old_file_str = fuzzy_path.name
                         new_file_str = new_stem + old_file_str[len(fuzzy_stem):]
@@ -1154,7 +1161,7 @@ class Media(models.Model):
                             continue
                         log.debug(f'Considering rename for: {self!s}\n\t{fuzzy_path!s}\n\t{new_file_path!s}')
                         # it quite possibly was renamed already
-                        if fuzzy_path.exists() and not new_file_path.exists():
+                        if not (new_video_path.samefile(fuzzy_path) or new_file_path.exists()):
                             log.debug(f'{self!s}: {fuzzy_path!s} => {new_file_path!s}')
                             fuzzy_path.rename(new_file_path)
 
@@ -1179,6 +1186,7 @@ class Media(models.Model):
 Media.copy_thumbnail = copy_thumbnail
 Media.download_checklist = download_checklist
 Media.download_finished = download_finished
+Media.failed_format = failed_format
 Media.refresh_formats = refresh_formats
 Media.wait_for_premiere = wait_for_premiere
 Media.write_nfo_file = write_nfo_file

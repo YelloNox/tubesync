@@ -1,11 +1,13 @@
 import datetime
 import os
+import uuid
 from functools import wraps
 from huey import (
-    CancelExecution, SqliteHuey as huey_SqliteHuey,
+    CancelExecution, Huey as huey_Huey,
     signals, utils,
 )
 from huey.api import TaskLock
+from huey.storage import SqliteStorage as huey_SqliteStorage
 from .timestamp import datetime_to_timestamp, timestamp_to_datetime
 
 
@@ -26,27 +28,119 @@ TaskLock.acquired = property(
 )
 
 
-class SqliteHuey(huey_SqliteHuey):
+class SqliteStorage(huey_SqliteStorage):
     begin_sql = 'BEGIN IMMEDIATE'
     auto_vacuum = 'INCREMENTAL'
+    journal_size_limit = 1024 * 1024 * 64
+    wal_autocheckpoint = 100
     vacuum_pages = 10
 
     def _create_connection(self):
         conn = super()._create_connection()
-        conn.execute(f'PRAGMA incremental_vacuum({self.vacuum_pages})')
+        conn.execute(f'PRAGMA auto_vacuum = {self.auto_vacuum}')
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute(f'PRAGMA journal_size_limit = {self.journal_size_limit}')
+        conn.execute('PRAGMA user_version = 1')
+        conn.execute(f'PRAGMA wal_autocheckpoint={self.wal_autocheckpoint}')
         # copied from huey_SqliteHuey to use EXTRA or NORMAL
         # instead of FULL or OFF
         conn.execute('pragma synchronous=%s' % (3 if self._fsync else 1))
+        # take at most vacuum_pages off the free list
+        conn.execute(f'PRAGMA incremental_vacuum({self.vacuum_pages})')
         return conn
+
+    def initialize_schema(self):
+        super().initialize_schema()
+        auto_vacuum_dict = {'NONE': 0, 'FULL': 1, 'INCREMENTAL': 2}
+        valid = set(auto_vacuum_dict.values()) | set(auto_vacuum_dict.keys())
+        assert self.auto_vacuum in valid, 'auto_vacuum was invalid'
+        current = self.sql('PRAGMA auto_vacuum', results=True)
+        expected = auto_vacuum_dict.get(self.auto_vacuum) or self.auto_vacuum
+        vacuum_db = True
+        try:
+            current = int(current[0][0])
+            expected = int(expected)
+        except (TypeError, ValueError,):
+            pass
+        else:
+            vacuum_db = (current != expected)
+        with self.db(close=True) as curs:
+            curs.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            if vacuum_db:
+                curs.execute(f'PRAGMA auto_vacuum = {self.auto_vacuum}')
+                curs.execute('VACUUM')
+
+
+class Huey(huey_Huey):
+
+    # do not use __len__ (pending_count) for bool
+    def __bool__(self):
+        if not (self._registry._registry or self._registry._periodic_tasks):
+            return False
+        return True
 
     def _emit(self, signal, task, *args, **kwargs):
         kwargs['huey'] = self
         super()._emit(signal, task, *args, **kwargs)
 
-    def initialize_schema(self):
-        self.ddl.insert(0, f'PRAGMA auto_vacuum = {self.auto_vacuum}')
-        self.ddl.append('VACUUM')
-        super().initialize_schema()
+    def reschedule(self, task_id, eta):
+        pc = self.pending_count()
+        found = [
+            t
+            for t in self.pending(100)
+            if t.id == task_id
+        ]
+        if not found and pc > 100:
+            found = [
+                t
+                for t in self.pending()
+                if t.id == task_id
+            ]
+        if not found:
+            found = [
+                t
+                for t in self.scheduled()
+                if t.id == task_id
+            ]
+        if not found:
+            return False
+        for t in found:
+            self.revoke(t, revoke_once=True)
+        task_eta = utils.normalize_time(eta=eta, utc=self.utc)
+        for t in found:
+            previous_id = t.id
+            t.eta = task_eta
+            t.id = t.create_id()
+            t.revoke_id = f'r:{t.id}'
+            try:
+                from common.models import TaskHistory
+                th = TaskHistory.objects.get(task_id=previous_id)
+            except:
+                pass
+            else:
+                # clone the old task history
+                th.pk = None
+                th._state.adding = True
+                th.task_id = t.id
+                th.save()
+            self.enqueue(t)
+        return True
+
+    def scheduled_at_from_task(self, task_obj, /):
+        scheduled_at = None
+        if not (hasattr(task_obj, 'eta') and task_obj.eta):
+            return None
+        if self.utc:
+            scheduled_at = task_obj.eta.replace(tzinfo=datetime.timezone.utc)
+        else: # this path is unlikely
+            scheduled_at = timestamp_to_datetime(
+                datetime_to_timestamp(task_obj.eta, integer=False),
+            ).astimezone(tz=datetime.timezone.utc)
+        return scheduled_at
+
+
+class SqliteHuey(Huey):
+    storage_class = SqliteStorage
 
 
 def CancelExecution_init(self, *args, retry=None, **kwargs):
@@ -96,7 +190,7 @@ def h_q_reset_tasks(q, /, *, maint_func=None):
             return
         if 'exception' == status and exception is not None:
             # log, but do not raise an exception
-            from huey import logger
+            from huey.api import logger
             logger.error(
                 f'{queue.name}: maintenance function exception: {exception}'
             )
@@ -132,7 +226,8 @@ def sqlite_tasks(key, /, prefix=None, thread=None, workers=None):
         workers = 2
     finally:
         if 0 >= workers:
-            workers = os.cpu_count()
+            useful_cpus = os.sched_getaffinity(0)
+            workers = max(2, len(useful_cpus) // 2)
         elif 1 == workers:
             thread = False
     return dict(
@@ -211,10 +306,42 @@ def dynamic_retry(task_func=None, /, *args, **kwargs):
 
 # Signal handlers shared between queues
 
+def on_executing_remove_duplicates(signal_name, task_obj, exception_obj=None, /, *, huey=None):
+    if signals.SIGNAL_EXECUTING != signal_name:
+        return
+    assert exception_obj is None
+    assert huey is not None
+    assert hasattr(huey, 'pending') and callable(huey.pending)
+    assert hasattr(huey, 'revoke_by_id') and callable(huey.revoke_by_id)
+    assert hasattr(huey, 'scheduled') and callable(huey.scheduled)
+    assert signals.SIGNAL_EXECUTING == signal_name
+
+    from common.models import TaskHistory
+    try:
+        th = TaskHistory.objects.get(task_id=str(task_obj.id))
+    except TaskHistory.DoesNotExist:
+        return
+    else:
+        if not th.remove_duplicates:
+            return
+
+    waiting = [
+        t
+        for t in huey.pending() + huey.scheduled()
+        if task_obj.id != t.id and
+        task_obj.name == t.name and
+        task_obj.data == t.data and
+        task_obj.priority >= t.priority and
+        task_obj.retries <= t.retries
+    ]
+    for t in waiting:
+        huey.revoke_by_id(t.id, revoke_once=True)
+
 def on_interrupted(signal_name, task_obj, exception_obj=None, /, *, huey=None):
     if signals.SIGNAL_INTERRUPTED != signal_name:
         return
     assert exception_obj is None
+    assert huey is not None
     assert hasattr(huey, 'enqueue') and callable(huey.enqueue)
     huey.enqueue(task_obj)
 
@@ -223,6 +350,9 @@ storage_key_prefix = 'task_history:'
 def historical_task(signal_name, task_obj, exception_obj=None, /, *, huey=None):
     signal_time = utils.time_clock()
     signal_dt = datetime.datetime.now(datetime.timezone.utc)
+    assert huey is not None
+    assert hasattr(huey, 'get') and callable(huey.get)
+    assert hasattr(huey, 'put') and callable(huey.put)
 
     from common.models import TaskHistory
     add_to_elapsed_signals = frozenset((
@@ -249,7 +379,7 @@ def historical_task(signal_name, task_obj, exception_obj=None, /, *, huey=None):
             peek=True,
         ) or dict(
             created=signal_dt,
-            data=task_obj.data,
+            data=(task_obj.args, repr(task_obj.kwargs),),
             elapsed=0,
             module=task_obj.__module__,
             name=task_obj.name,
@@ -283,26 +413,42 @@ def historical_task(signal_name, task_obj, exception_obj=None, /, *, huey=None):
         th.failed_at = signal_dt
         th.last_error = str(exception_obj)
     elif signal_name == signals.SIGNAL_ENQUEUED:
-        from sync.models import Media, Source
-        if not th.verbose_name and task_obj.args:
-            key = task_obj.args[0]
-            for model in (Media, Source,):
+        scheduled_at = huey.scheduled_at_from_task(task_obj)
+        if scheduled_at:
+            th.scheduled_at = scheduled_at
+        if not th.verbose_name:
+            try:
+                from django.core.exceptions import ValidationError
+                from sync.models import Media, Source
+            except:
+                pass
+            else:
                 try:
-                    model_instance = model.objects.get(pk=key)
-                except model.DoesNotExist:
-                    pass
+                    key = task_obj.args[0]
+                    instance_uuid_str = str(key)
+                    instance_uuid = uuid.UUID(instance_uuid_str)
+                except IndexError:
+                    key = None
+                except RuntimeError:
+                    instance_uuid_str = None
+                except ValueError:
+                    instance_uuid = None
                 else:
-                    if hasattr(model_instance, 'key'):
-                        th.verbose_name = f'{th.name} with: {model_instance.key}'
-                        if hasattr(model_instance, 'name'):
-                            th.verbose_name += f' / {model_instance.name}'
+                    for model in (Source, Media,):
+                        try:
+                            model_instance = model.objects.get(pk=instance_uuid)
+                        except (model.DoesNotExist, ValidationError,):
+                            pass
+                        else:
+                            if hasattr(model_instance, 'key'):
+                                th.verbose_name = f'{th.name} with: {model_instance.key}'
+                                if hasattr(model_instance, 'name'):
+                                    th.verbose_name += f' / {model_instance.name}'
+                            break
     elif signal_name == signals.SIGNAL_SCHEDULED:
-        if huey.utc:
-            th.scheduled_at = task_obj.eta.replace(tzinfo=datetime.UTC)
-        else: # this path is unlikely
-            th.scheduled_at = timestamp_to_datetime(
-                datetime_to_timestamp(task_obj.eta, integer=False),
-            ).astimezone(tz=datetime.UTC)
+        scheduled_at = huey.scheduled_at_from_task(task_obj)
+        if scheduled_at:
+            th.scheduled_at = scheduled_at
     th.end_at = signal_dt
     th.elapsed = history['elapsed']
     th.save()
@@ -314,19 +460,31 @@ def register_huey_signals():
     for qn in DJANGO_HUEY.get('queues', dict()):
         signal(signals.SIGNAL_INTERRUPTED, queue=qn)(on_interrupted)
         signal(queue=qn)(historical_task)
+        signal(signals.SIGNAL_EXECUTING, queue=qn)(on_executing_remove_duplicates)
 
         # clean up old history and results from storage
         q = get_queue(qn)
         now_time = utils.time_clock()
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
         for key in q.all_results().keys():
             if not key.startswith(storage_key_prefix):
                 continue
             history = q.get(peek=True, key=key)
             if not isinstance(history, dict):
                 continue
-            age = datetime.timedelta(
-                seconds=(now_time - history.get(signals.SIGNAL_EXECUTING, now_time)),
-            )
+            if 'created' not in history:
+                # Set an incorrect created time to ensure eventual removal.
+                history['created'] = now_dt
+                q.put(key=key, data=history)
+                # Attempt to calculate an accurate age.
+                # This doesn't work all the time,
+                # so the created datetime is the fail-safe case.
+                seconds = now_time - history.get(signals.SIGNAL_EXECUTING, now_time)
+                age = datetime.timedelta(
+                    seconds=(seconds if seconds > 0 else 0),
+                )
+            else:
+                age = now_dt - history['created']
             if age > datetime.timedelta(days=7):
                 result_key = key[len(storage_key_prefix) :]
                 q.get(peek=False, key=result_key)

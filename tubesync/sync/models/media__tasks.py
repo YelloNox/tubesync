@@ -18,12 +18,11 @@ def copy_thumbnail(self):
     if not self.source.copy_thumbnails:
         return
     if not self.thumb_file_exists:
-        from sync.tasks import delete_task_by_media, download_media_thumbnail
+        from sync.tasks import download_media_image
         args = ( str(self.pk), self.thumbnail, )
         if not args[1]:
             return
-        delete_task_by_media('sync.tasks.download_media_thumbnail', args)
-        if download_media_thumbnail.now(*args):
+        if download_media_image.call_local(*args):
             self.refresh_from_db()
     if not self.thumb_file_exists:
         return
@@ -94,6 +93,8 @@ def download_finished(self, format_str, container, downloaded_filepath=None):
     media.download_date = timezone.now()
     media.downloaded_filesize = os.path.getsize(filepath)
     media.downloaded_container = container
+    media.manual_skip = False
+    media.skip = False
     if '+' in format_str:
         # Seperate audio and video streams
         vformat_code, aformat_code = format_str.split('+')
@@ -105,7 +106,7 @@ def download_finished(self, format_str, container, downloaded_filepath=None):
         media.downloaded_audio_codec = aformat['acodec']
         media.downloaded_video_codec = vformat['vcodec']
         media.downloaded_container = container
-        media.downloaded_fps = vformat['fps']
+        media.downloaded_fps = round(vformat['fps'])
         media.downloaded_hdr = vformat['is_hdr']
     else:
         # Combined stream or audio-only stream
@@ -118,10 +119,25 @@ def download_finished(self, format_str, container, downloaded_filepath=None):
             media.downloaded_height = cformat['height']
             media.downloaded_width = cformat['width']
             media.downloaded_video_codec = cformat['vcodec']
-            media.downloaded_fps = cformat['fps']
+            media.downloaded_fps = round(cformat['fps'])
             media.downloaded_hdr = cformat['is_hdr']
         else:
             self.downloaded_format = Val(SourceResolution.AUDIO)
+
+
+def failed_format(self, format_str, /, *, cause=None, exc=None):
+    if not self.has_metadata:
+        return
+    t = format_str.partition('+')
+    data = self.loaded_metadata
+    field = self.get_metadata_field('formats')
+    formats = data.get(field, list())
+    new_formats = [
+        f
+        for f in formats
+        if f.get('format_id') not in (t[0],)
+    ]
+    self.save_to_metadata(field, new_formats)
 
 
 def refresh_formats(self):
@@ -195,7 +211,7 @@ def refresh_formats(self):
         fmt_dict['a'] = 'availability'
         fmt_dict['j'] = ', and ' if 'thumbnails' == fmt_dict['t'] else ', '
         fmt_dict['s'] = '; '
-    return (True, False, 'updated formats{s}{a}{j}{t}'.format(**fmt_dict))
+    return (True, False, 'updated formats{s}{a}{j}{t}'.format(**{k:fmt_dict[k] for k in 'sajt'}))
 
 
 def wait_for_premiere(self):

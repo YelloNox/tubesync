@@ -8,26 +8,57 @@ from ..json import JSONEncoder
 
 # cls = TaskHistory
 # TaskHistory is defined below this function in this file
-def set_verbose_name(cls, task_wrapper, /, *args, vn_args=(), vn_fmt=None, **kwargs):
+def th_schedule(cls, task_wrapper, /, *args, remove_duplicates=False, vn_args=(), vn_fmt=None, **kwargs):
     assert vn_fmt is not None, 'vn_fmt is required'
     if vn_fmt is None:
         return False
+    defaults = dict(
+        queue=task_wrapper.huey.name,
+        remove_duplicates=remove_duplicates,
+        verbose_name=str(vn_fmt).format(*vn_args),
+    )
     # support using the delay setting from the decorator
     if not ('delay' in kwargs or 'eta' in kwargs):
         kwargs['delay'] = task_wrapper.settings.get('delay') or int()
-    result = task_wrapper.schedule(args=args, **kwargs)
-    try:
-        task_history = cls.objects.get(task_id=str(result.id))
-    except cls.DoesNotExist:
-        pass
-    else:
-        task_history.verbose_name = str(vn_fmt).format(*vn_args)
-        task_history.save()
-        return True
-    return False
+    task_obj = task_wrapper.s(*args, **kwargs)
+    task_id = str(task_obj.id)
+    scheduled_at = task_wrapper.huey.scheduled_at_from_task(task_obj)
+    if scheduled_at:
+        defaults['scheduled_at'] = scheduled_at
+    defaults['end_at'] = timezone.datetime.now(timezone.timezone.utc)
+    defaults['name'] = f'{task_obj.__module__}.{task_obj.name}'
+    defaults['priority'] = task_obj.priority
+    defaults['task_params'] = list((
+        list(task_obj.args),
+        repr(task_obj.kwargs),
+    ))
+    cls.objects.update_or_create(
+        task_id=task_id,
+        defaults=defaults,
+        create_defaults={
+            'task_id': task_id,
+            **defaults,
+        },
+    )
+    task_wrapper.huey.enqueue(task_obj)
+    return True
 
 
 class TaskHistoryQuerySet(models.QuerySet):
+
+    def running(self, now=None, within=None):
+        if now is None:
+            now = timezone.now()
+        qs = self.filter(
+            start_at=models.F('end_at'),
+            scheduled_at__lte=models.F('end_at'),
+        ).order_by('end_at')
+        if within:
+            if not isinstance(within, timedelta):
+                within = timedelta(seconds=within)
+            time_limit = now - within
+            qs = qs.filter(end_at__gt=time_limit)
+        return qs
 
     def failed(self, within=None):
         """
@@ -64,7 +95,7 @@ class TaskHistoryQuerySet(models.QuerySet):
 class TaskHistory(models.Model):
     # the "name" of the task/function to be run
     name = models.CharField(max_length=190, db_index=True)
-    task_id = models.CharField(max_length=40, db_index=True)
+    task_id = models.CharField(max_length=40, unique=True)
     # the json encoded parameters to pass to the task
     task_params = models.JSONField(default=dict, encoder=JSONEncoder)
 
@@ -92,11 +123,13 @@ class TaskHistory(models.Model):
     repeat = models.BigIntegerField(default=int)
     repeat_until = models.DateTimeField(null=True, blank=True)
 
+    remove_duplicates = models.BooleanField(default=bool)
+
     objects = TaskHistoryQuerySet.as_manager()
 
     @classmethod
     def schedule(cls, task_wrapper, /, *args, vn_args=(), vn_fmt=None, **kwargs):
-        return set_verbose_name(cls, task_wrapper, *args, vn_fmt=vn_fmt, vn_args=vn_args, **kwargs)
+        return th_schedule(cls, task_wrapper, *args, vn_fmt=vn_fmt, vn_args=vn_args, **kwargs)
 
     def save(self, *args, **kwargs):
         self.queue = self.queue or None

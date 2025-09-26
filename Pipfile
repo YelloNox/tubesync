@@ -7,14 +7,13 @@ verify_ssl = true
 autopep8 = "*"
 
 [packages]
-django = "~=5.2.1"
+django = "~=5.2.5"
 django-huey = "*"
 django-sass-processor = {extras = ["management-command"], version = "*"}
 pillow = "*"
 whitenoise = "*"
 gunicorn = "*"
 httptools = "*"
-django-background-tasks = ">=1.2.8"
 django-basicauth = "*"
 psycopg = {extras = ["binary", "pool"], version = "*"}
 mysqlclient = "*"
@@ -25,5 +24,5 @@ yt-dlp = {extras = ["default", "curl-cffi"], version = "*"}
 emoji = "*"
 brotli = "*"
 html5lib = "*"
-bgutil-ytdlp-pot-provider = "~=1.0"
+bgutil-ytdlp-pot-provider = "~=1.2.2"
 babi = "*"

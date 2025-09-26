@@ -11,7 +11,7 @@ from functools import partial
 from operator import attrgetter, itemgetter
 from pathlib import Path
 from urllib.parse import urlunsplit, urlencode, urlparse
-from .errors import DatabaseConnectionError
+from .errors import DatabaseConnectionError, QuerySetEmptyError
 
 def directory_and_stem(arg_path, /, all_suffixes=False):
     filepath = Path(arg_path)
@@ -72,9 +72,12 @@ def glob_quote(filestr, /):
 
 def list_of_dictionaries(arg_list, /, arg_function=lambda x: x):
     assert callable(arg_function)
-    if isinstance(arg_list, list):
+    _map_list = arg_list
+    if hasattr(arg_list, 'exhaust') and callable(arg_list.exhaust):
+        _map_list = arg_list.exhaust()
+    if isinstance(_map_list, list):
         _map_func = partial(lambda f, d: f(d) if isinstance(d, dict) else d, arg_function)
-        return (True, list(map(_map_func, arg_list)),)
+        return (True, list(map(_map_func, _map_list)),)
     return (False, arg_list,)
 
 
@@ -118,10 +121,21 @@ def parse_database_connection_string(database_connection_string):
         'mysql': 'django.db.backends.mysql',
     }
     backend_options = {
-        'postgresql': {},
+        'postgresql': dict(pool={
+            'max_size': 10, # default: None (static min_size pool)
+            'min_size': 3, # default: 4
+            'num_workers': 2, # default: 3
+            'timeout': 180, # default: 30
+        }),
         'mysql': {
             'charset': 'utf8mb4',
         }
+    }
+    db_overrides = {
+        'mysql': {
+            'CONN_MAX_AGE': 300,
+        },
+        'postgresql': dict(),
     }
     try:
         parts = urlparse(str(database_connection_string))
@@ -173,7 +187,7 @@ def parse_database_connection_string(database_connection_string):
     if '/' in database:
         raise DatabaseConnectionError(f'Database connection string path can only '
                                       f'contain a single string name, got: {database}')
-    return {
+    db_dict = {
         'DRIVER': driver,
         'ENGINE': django_driver,
         'NAME': database,
@@ -181,9 +195,13 @@ def parse_database_connection_string(database_connection_string):
         'PASSWORD': password,
         'HOST': hostname,
         'PORT': port,
-        'CONN_MAX_AGE': 300,
+        'CONN_HEALTH_CHECKS': True,
+        'CONN_MAX_AGE': 0,
         'OPTIONS': backend_options.get(driver),
     }
+    db_dict.update(db_overrides.get(driver))
+    
+    return db_dict
 
 
 def get_client_ip(request):
@@ -289,14 +307,22 @@ def django_queryset_generator(query_set, /, *,
     gc.disable()
     if use_chunked_fetch:
         for key in qs._iterator(use_chunked_fetch, chunk_size):
-            yield query_set.filter(pk=key)[0]
+            try:
+                yield query_set.filter(pk=key)[0]
+            except IndexError as exc:
+                msg = f'missing primary key: {key}'
+                raise QuerySetEmptyError(msg, exc=exc, key=key) from exc
             key = None
             gc.collect(generation=1)
         key = None
     else:
         for page in iter(Paginator(qs, page_size)):
             for key in page.object_list:
-                yield query_set.filter(pk=key)[0]
+                try:
+                    yield query_set.filter(pk=key)[0]
+                except IndexError as exc:
+                    msg = f'missing primary key: {key}'
+                    raise QuerySetEmptyError(msg, exc=exc, key=key) from exc
                 key = None
                 gc.collect(generation=1)
             key = None

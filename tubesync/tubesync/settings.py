@@ -10,9 +10,9 @@ CONFIG_BASE_DIR = BASE_DIR
 DOWNLOADS_BASE_DIR = BASE_DIR
 
 
-VERSION = '0.15.7'
+VERSION = '0.15.9'
 SECRET_KEY = ''
-DEBUG = False
+DEBUG = 'true' == getenv('TUBESYNC_DEBUG').strip().lower()
 ALLOWED_HOSTS = []
 
 
@@ -25,7 +25,6 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.humanize',
     'sass_processor',
-    'background_task',
     'django_huey',
     'common',
     'sync',
@@ -53,7 +52,7 @@ FORCE_SCRIPT_NAME = None
 DJANGO_HUEY = {
     'default': TaskQueue.LIMIT.value,
     'queues': dict(),
-    'verbose': None if 'true' == getenv('TUBESYNC_DEBUG', False).strip().lower() else False,
+    'verbose': None if DEBUG else False,
 }
 for queue_name in TaskQueue.values:
     queues = DJANGO_HUEY['queues']
@@ -181,6 +180,7 @@ MEDIA_THUMBNAIL_HEIGHT = 240                # Height in pixels to resize thumbna
 
 VIDEO_HEIGHT_CUTOFF = 240                   # Smallest resolution in pixels permitted to download
 VIDEO_HEIGHT_IS_HD = 500                    # Height in pixels to count as 'HD'
+VIDEO_HEIGHT_UPGRADE = True                 # Download again when a format with more pixels is available
 
 
 
@@ -193,18 +193,21 @@ SOURCE_DOWNLOAD_DIRECTORY_PREFIX = True
 
 YOUTUBE_DL_CACHEDIR = None
 YOUTUBE_DL_TEMPDIR = None
+YOUTUBE_DL_SKIP_UNAVAILABLE_FORMAT = False
 YOUTUBE_DEFAULTS = {
     'color': 'never',       # Do not use colours in output
     'age_limit': 99,        # 'Age in years' to spoof
     'ignoreerrors': False,  # When true, yt-dlp does not raise descriptive exceptions
     'cachedir': False,      # Disable on-disk caching
     'addmetadata': True,    # Embed metadata during postprocessing where available
+    'updatetime': True,     # Set mtime in recent versions
+    'update_self': False,   # Updates are handled by pip
     'geo_verification_proxy': getenv('geo_verification_proxy').strip() or None,
     'max_sleep_interval': (60)*5,
     'sleep_interval': 0.25,
     'extractor_args': {
         'youtubepot-bgutilhttp': {
-            'baseurl': ['http://127.0.0.1:4416'],
+            'base_url': ['http://127.0.0.1:4416'],
         },
     },
 }

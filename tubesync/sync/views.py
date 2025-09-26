@@ -22,19 +22,19 @@ from django.utils.translation import gettext_lazy as _
 from common.models import TaskHistory
 from common.timestamp import timestamp_to_datetime
 from common.utils import append_uri_params, mkdir_p, multi_key_sort
-from background_task.models import Task
 from django_huey import DJANGO_HUEY, get_queue
 from common.huey import h_q_reset_tasks
-from .models import Source, Media, MediaServer
+from common.logger import log
+from .models import Source, Media, MediaServer, Metadata
 from .forms import (ValidateSourceForm, ConfirmDeleteSourceForm, RedownloadMediaForm,
                     SkipMediaForm, EnableMediaForm, ResetTasksForm, ScheduleTaskForm,
                     ConfirmDeleteMediaServerForm, SourceForm)
 from .utils import delete_file, validate_url
-from .tasks import (map_task_to_instance, get_error_message,
-                    get_source_completed_tasks, get_media_download_task,
-                    delete_task_by_media, index_source_task,
-                    download_media_thumbnail,
-                    check_source_directory_exists, migrate_queues)
+from .tasks import (
+    map_task_to_instance, get_error_message,
+    get_running_tasks, get_media_download_task, get_source_completed_tasks,
+    check_source_directory_exists, index_source, download_media_image, download_media_file,
+)
 from .choices import (Val, MediaServerType, SourceResolution, IndexSchedule,
                         YouTube_SourceType, youtube_long_source_types,
                         youtube_help, youtube_validation_urls)
@@ -43,9 +43,6 @@ from . import youtube
 
 
 def get_waiting_tasks():
-    background_task_ids = {
-        str(t.pk) for t in Task.objects.all()
-    }
     huey_queue_names = (DJANGO_HUEY or {}).get('queues', {})
     huey_queues = list(map(get_queue, huey_queue_names))
     huey_task_ids = {
@@ -56,7 +53,7 @@ def get_waiting_tasks():
         )
     }
     return TaskHistory.objects.filter(
-        task_id__in=huey_task_ids.union(background_task_ids),
+        task_id__in=huey_task_ids,
     )
 
 
@@ -142,18 +139,16 @@ class SourcesView(ListView):
 
     def get(self, *args, **kwargs):
         if args[0].path.startswith("/source-sync-now/"):
-            sobj = Source.objects.get(pk=kwargs["pk"])
-            if sobj is None:
+            source = Source.objects.get(pk=kwargs["pk"])
+            if source is None:
                 return HttpResponseNotFound()
 
-            source = sobj
-            verbose_name = _('Index media from source "{}" once')
-            index_source_task(
+            TaskHistory.schedule(
+                index_source,
                 str(source.pk),
-                remove_existing_tasks=False,
-                repeat=0,
-                schedule=30,
-                verbose_name=verbose_name.format(source.name),
+                delay=30,
+                vn_fmt=_('Index media from source "{}" once'),
+                vn_args=(source.name,),
             )
             url = reverse_lazy('sync:sources')
             url = append_uri_params(url, {'message': 'source-refreshed'})
@@ -505,29 +500,81 @@ class MediaView(ListView):
         self.filter_source = None
         self.show_skipped = False
         self.only_skipped = False
+        self.query = None
+        self.search_description = False
+        self.sp = None
         super().__init__(*args, **kwargs)
 
     def dispatch(self, request, *args, **kwargs):
-        filter_by = request.GET.get('filter', '')
+        def is_active(arg, /):
+            return str(arg).strip().lower() in (
+                'enable', 'enabled', 'on', 'true', 'yes', '1',
+            )
+        def post_or_get(request, /, key, default=None):
+            return request.POST.get(key) or request.GET.get(key) or default
+
+        filter_by = post_or_get(request, 'filter', '')
         if filter_by:
             try:
                 self.filter_source = Source.objects.get(pk=filter_by)
             except Source.DoesNotExist:
                 self.filter_source = None
-        show_skipped = request.GET.get('show_skipped', '').strip()
-        if show_skipped == 'yes':
+        show_skipped = post_or_get(request, 'show_skipped', '')
+        if is_active(show_skipped):
             self.show_skipped = True
-        if not self.show_skipped:
-            only_skipped = request.GET.get('only_skipped', '').strip()
-            if only_skipped == 'yes':
-                self.only_skipped = True
+        only_skipped = post_or_get(request, 'only_skipped', '')
+        if is_active(only_skipped):
+            self.only_skipped = True
+        self.query = post_or_get(request, 'query')
+        self.search_description = is_active(post_or_get(request, 'search_description'))
+        self.sp = post_or_get(request, 'sp')
+        if self.sp not in ('combined', 'union', 'or',):
+            self.sp = 'or'
         return super().dispatch(request, *args, **kwargs)
 
     def get_queryset(self):
         q = Media.objects.all()
+        md_qs = Metadata.objects.all()
+        needle = self.query
 
         if self.filter_source:
             q = q.filter(source=self.filter_source)
+        m_q = q
+        if needle and 'combined' == self.sp:
+            if self.search_description:
+                q = q.filter(
+                    Q(new_metadata__value__description__icontains=needle) |
+                    Q(key__contains=needle) |
+                    Q(title__icontains=needle) |
+                    Q(new_metadata__value__fulltitle__icontains=needle)
+                )
+            else:
+                q = q.filter(
+                    Q(key__contains=needle) |
+                    Q(title__icontains=needle) |
+                    Q(new_metadata__value__fulltitle__icontains=needle)
+                )
+        elif needle:
+            md_q = md_qs.filter(
+                Q(media__in=m_q) &
+                (
+                    Q(key__contains=needle) |
+                    Q(media__title__icontains=needle) |
+                    Q(value__fulltitle__icontains=needle)
+                )
+            ).only('pk')
+            if 'union' == self.sp:
+                if self.search_description:
+                    q = q.union(m_q.filter(new_metadata__value__description__icontains=needle).only('pk'))
+                    # We need to be able to filter again, even after using union
+                    q = m_q.filter(pk__in=q.only('pk'))
+                else:
+                    q = m_q.filter(new_metadata__in=md_q)
+            else:
+                if self.search_description:
+                    q = m_q.filter(Q(new_metadata__value__description__icontains=needle) | Q(new_metadata__in=md_q))
+                else:
+                    q = m_q.filter(new_metadata__in=md_q)
         if self.only_skipped:
             q = q.filter(Q(can_download=False) | Q(skip=True) | Q(manual_skip=True))
         elif not self.show_skipped:
@@ -545,6 +592,8 @@ class MediaView(ListView):
             data['source'] = self.filter_source
         data['show_skipped'] = self.show_skipped
         data['only_skipped'] = self.only_skipped
+        data['query'] = self.query or str()
+        data['search_description'] = self.search_description
         return data
 
 
@@ -628,11 +677,16 @@ class MediaItemView(DetailView):
             if media is None:
                 return HttpResponseNotFound()
 
-            verbose_name = _('Redownload thumbnail for "{}": {}')
-            download_media_thumbnail(
+            TaskHistory.schedule(
+                download_media_image,
                 str(media.pk),
                 media.thumbnail,
-                verbose_name=verbose_name.format(media.key, media.name),
+                priority=1+download_media_image.settings.get('default_priority', 0),
+                vn_fmt=_('Redownload thumbnail for "{}": {}'),
+                vn_args=(
+                    media.key,
+                    media.name,
+                ),
             )
             url = reverse_lazy('sync:media-item', kwargs={'pk': media.pk})
             url = append_uri_params(url, {'message': 'thumbnail'})
@@ -659,8 +713,20 @@ class MediaRedownloadView(FormView, SingleObjectMixin):
         return super().dispatch(request, *args, **kwargs)
 
     def form_valid(self, form):
-        # Delete any active download tasks for the media
-        delete_task_by_media('sync.tasks.download_media', (str(self.object.pk),))
+        # Try to download manually, when can_download was true
+        media = self.object
+        if media.can_download:
+            TaskHistory.schedule(
+                download_media_file,
+                str(media.pk),
+                override=True,
+                priority=90,
+                remove_duplicates=True,
+                retries=3,
+                retry_delay=600,
+                vn_fmt=_('Downloading media (manually) for "{}"'),
+                vn_args=(media.name,),
+            )
         # If the thumbnail file exists on disk, delete it
         if self.object.thumb_file_exists:
             delete_file(self.object.thumb.path)
@@ -711,8 +777,6 @@ class MediaSkipView(FormView, SingleObjectMixin):
         return super().dispatch(request, *args, **kwargs)
 
     def form_valid(self, form):
-        # Delete any active download tasks for the media
-        delete_task_by_media('sync.tasks.download_media', (str(self.object.pk),))
         # If the media file exists on disk, delete it
         if self.object.media_file_exists:
             # Delete all files which contains filename
@@ -870,11 +934,7 @@ class TasksView(ListView):
         scheduled_qs = get_waiting_tasks()
         # Huey removes running tasks,
         # so the waiting tasks will not include them.
-        running_qs = TaskHistory.objects.filter(
-            start_at=F('end_at'),
-            scheduled_at__lte=F('end_at'),
-            end_at__gte=now_dt-timezone.timedelta(hours=12),
-        )
+        running_qs = get_running_tasks(now_dt)
         errors_qs = scheduled_qs.filter(
             attempts__gt=0
         ).exclude(last_error__exact='')
@@ -887,7 +947,6 @@ class TasksView(ListView):
         data['total_errors'] = errors_qs.count()
         data['scheduled'] = list()
         data['total_scheduled'] = scheduled_qs.count()
-        data['migrated'] = migrate_queues()
         data['wait_for_database_queue'] = False
 
         def add_to_task(task):
@@ -901,37 +960,6 @@ class TasksView(ListView):
                 setattr(task, 'error_message', error_message)
                 return 'error'
             return True and obj
-
-        verbose_names = dict()
-        for task in Task.objects.filter(locked_by__isnull=False):
-            # There was broken logic in `Task.objects.locked()`, work around it.
-            # With that broken logic, the tasks never resume properly.
-            # This check unlocks the tasks without a running process.
-            # `task.locked_by_pid_running()` returns:
-            # - `True`: locked and PID exists
-            # - `False`: locked and PID does not exist
-            # - `None`: not `locked_by`, so there was no PID to check
-            locked_by_pid_running = task.locked_by_pid_running()
-            if locked_by_pid_running is False:
-                task.locked_by = None
-                # do not wait for the task to expire
-                task.locked_at = None
-                task.save()
-            task_id = str(task.pk)
-            verbose_names[task_id] = task.verbose_name
-            try:
-                task = TaskHistory.objects.get(task_id=task_id)
-            except TaskHistory.DoesNotExist:
-                # possibly create a new instance?
-                pass
-            else:
-                if locked_by_pid_running and add_to_task(task):
-                    # Use the status if it is available
-                    task.verbose_name = verbose_names.get(task_id) or task.verbose_name
-                    data['running'].append(task)
-                elif locked_by_pid_running and 'wait_for_database_queue' in task.name:
-                    data['wait_for_database_queue'] = True
-        verbose_names = None
 
         for task in running_qs:
             if task in data['running']:
@@ -966,14 +994,33 @@ class TasksView(ListView):
 
         sort_keys = (
             # key, reverse
-            ('scheduled_at', False),
             ('priority', True),
+            ('scheduled_at', False),
             ('run_now', True),
         )
         data['errors'] = multi_key_sort(data['errors'], sort_keys, attr=True)
         data['scheduled'] = multi_key_sort(data['scheduled'], sort_keys, attr=True)
 
         return data
+
+    def paginate_queryset(self, queryset, page_size):
+        """Paginate the queryset, if needed."""
+        paginator = self.get_paginator(
+            queryset,
+            page_size,
+            orphans=self.get_paginate_orphans(),
+            allow_empty_first_page=self.get_allow_empty(),
+        )
+        page_kwarg = self.page_kwarg
+        page = self.kwargs.get(page_kwarg) or self.request.GET.get(page_kwarg) or 1
+        try:
+            page_number = int(page)
+        except ValueError:
+            pass
+        else:
+            if page_number > paginator.num_pages:
+                self.kwargs[page_kwarg] = 'last'
+        return super().paginate_queryset(queryset, page_size)
 
 
 class CompletedTasksView(ListView):
@@ -1037,7 +1084,6 @@ class ResetTasks(FormView):
 
     def form_valid(self, form):
         # Delete all tasks
-        Task.objects.all().delete()
         huey_queue_names = (DJANGO_HUEY or {}).get('queues', {})
         for queue_name in huey_queue_names:
             h_q_reset_tasks(queue_name)
@@ -1060,7 +1106,8 @@ class TaskScheduleView(FormView, SingleObjectMixin):
 
     template_name = 'sync/task-schedule.html'
     form_class = ScheduleTaskForm
-    model = Task
+    model = TaskHistory
+    context_object_name = 'task'
     errors = dict(
         invalid_when=_('The type ({}) was incorrect.'),
         when_before_now=_('The date and time must be in the future.'),
@@ -1110,7 +1157,6 @@ class TaskScheduleView(FormView, SingleObjectMixin):
         )
 
     def form_valid(self, form):
-        max_attempts = getattr(settings, 'MAX_ATTEMPTS', 15)
         when = form.cleaned_data.get('when')
   
         if not isinstance(when, self.now.__class__):
@@ -1131,9 +1177,26 @@ class TaskScheduleView(FormView, SingleObjectMixin):
         if form.errors:
             return super().form_invalid(form)
 
-        self.object.attempts = max_attempts // 2
-        self.object.run_at = max(self.now, when)
-        self.object.save()
+        huey_queue_names = (DJANGO_HUEY or {}).get('queues', {})
+        huey_queues = list(map(get_queue, huey_queue_names))
+        pk = self.object.pk
+        queue = self.object.queue
+        task_id = self.object.task_id
+        matching = { q for q in huey_queues if q.name == queue }
+        try:
+            q = matching.pop()
+        except KeyError as e:
+            msg = f'TaskScheduleView: queue not found: {pk=} {queue=}'
+            log.exception(msg, exc_info=e)
+        else:
+            eta = max(self.now, when)
+            if q.reschedule(task_id, eta):
+                vn = self.object.verbose_name or task_id or pk
+                self.object.verbose_name = f'[revoked] {vn}'
+                self.object.save()
+            else:
+                msg = f'TaskScheduleView: task not found: {pk=} {task_id=}'
+                log.warning(msg)
 
         return super().form_valid(form)
 

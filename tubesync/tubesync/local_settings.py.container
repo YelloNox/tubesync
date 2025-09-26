@@ -21,8 +21,6 @@ SECRET_KEY = getenv('DJANGO_SECRET_KEY', 'tubesync-django-secret')
 
 ALLOWED_HOSTS_STR = getenv('TUBESYNC_HOSTS', '*')
 ALLOWED_HOSTS = ALLOWED_HOSTS_STR.split(',')
-DEBUG_STR = getenv('TUBESYNC_DEBUG', False)
-DEBUG = True if 'true' == DEBUG_STR.strip().lower() else False
 FORCE_SCRIPT_NAME = getenv('DJANGO_FORCE_SCRIPT_NAME', DJANGO_URL_PREFIX)
 
 
@@ -53,8 +51,13 @@ else:
             "OPTIONS": {
                 "timeout": 10,
                 "transaction_mode": "IMMEDIATE",
+                # PRAGMA locking_mode = NORMAL | EXCLUSIVE
                 # PRAGMA journal_mode = DELETE | TRUNCATE | PERSIST | MEMORY | WAL | OFF
+                # DO NOT change locking_mode to EXCLUSIVE!
+                # This is a foot-gun, and invalidates a behavior the code relies on.
+                # journal_mode WAL offers increased concurrency, the default is DELETE.
                 "init_command": """
+                    PRAGMA locking_mode = NORMAL;
                     PRAGMA journal_mode = TRUNCATE;
                     PRAGMA journal_size_limit = 67108864;
                     PRAGMA legacy_alter_table = OFF;

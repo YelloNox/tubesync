@@ -61,6 +61,10 @@ RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/va
     rm -f /var/cache/debconf/*.dat-old
 
 FROM ghcr.io/astral-sh/uv:latest AS uv-binaries
+FROM denoland/deno:bin AS deno-binaries
+
+FROM scratch AS deno
+COPY --from=deno-binaries /deno /usr/local/bin/deno
 
 FROM alpine:${ALPINE_VERSION} AS openresty-debian
 ARG TARGETARCH
@@ -401,6 +405,7 @@ RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/va
 
 # Install third party software
 COPY --from=s6-overlay / /
+COPY --from=deno /usr/local/bin/ /usr/local/bin/
 COPY --from=ffmpeg /usr/local/bin/ /usr/local/bin/
 
 RUN --mount=type=cache,id=apt-lib-cache-${TARGETARCH},sharing=private,target=/var/lib/apt \
@@ -514,10 +519,6 @@ RUN --mount=type=tmpfs,target=/cache \
 
 # Copy root
 COPY config/root /
-
-# patch background_task
-COPY patches/background_task/ \
-    /usr/local/lib/python3/dist-packages/background_task/
 
 # patch yt_dlp
 COPY patches/yt_dlp/ \
