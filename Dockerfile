@@ -3,8 +3,8 @@
 
 # FFMPEG Releases: https://github.com/yt-dlp/FFmpeg-Builds/releases
 
-ARG FFMPEG_DATE="autobuild-2025-10-21-14-39"
-ARG FFMPEG_VERSION="N-121477-gedf5b777c9"
+ARG FFMPEG_DATE="autobuild-2025-12-13-14-12"
+ARG FFMPEG_VERSION="N-122110-g3da2a21710"
 
 ARG S6_VERSION="3.2.0.3"
 
