@@ -214,7 +214,7 @@ ARG FFMPEG_CHECKSUM_AMD64="${SHA256_FFMPEG_AMD64}"
 ARG FFMPEG_CHECKSUM_ARM64="${SHA256_FFMPEG_ARM64}"
 
 ARG FFMPEG_FILE_SUMS="checksums.${CHECKSUM_ALGORITHM}"
-ARG FFMPEG_URL="https://github.com/yt-dlp/FFmpeg-Builds/releases/download/${FFMPEG_DATE}"
+ARG FFMPEG_URL="https://github.com/yt-dlp/FFmpeg-Builds/releases/download/autobuild-${FFMPEG_DATE}"
 
 ARG DESTDIR="/downloaded"
 ARG TARGETARCH
