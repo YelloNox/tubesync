@@ -226,6 +226,7 @@ def get_media_info(url, /, *, days=None, info_json=None):
     )
     for k in OUTTMPL_TYPES.keys():
         outtmpl.setdefault(k, '')
+    sleep_interval_requests = getattr(settings, 'YOUTUBE_INFO_SLEEP_REQUESTS', 1)
     opts.update({
         'ignoreerrors': False, # explicitly set this to catch exceptions
         'ignore_no_formats_error': False, # we must fail first to try again with this enabled
@@ -244,7 +245,7 @@ def get_media_info(url, /, *, days=None, info_json=None):
         'paths': paths,
         'postprocessors': postprocessors,
         'skip_unavailable_fragments': False,
-        'sleep_interval_requests': 1,
+        'sleep_interval_requests': sleep_interval_requests,
         'verbose': True if settings.DEBUG else False,
         'writeinfojson': True,
     })
@@ -389,7 +390,6 @@ def download_media(
         'skip_unavailable_fragments': False,
         'sleep_interval': 10,
         'max_sleep_interval': min(15*60, max(60, settings.DOWNLOAD_MEDIA_DELAY)),
-        'sleep_interval_requests': 3,
         'paths': opts.get('paths', dict()),
         'postprocessor_args': opts.get('postprocessor_args', dict()),
         'postprocessor_hooks': opts.get('postprocessor_hooks', list()),
@@ -429,9 +429,8 @@ def download_media(
         codec_options.extend(['-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '31', '-row-mt', '1', '-tile-columns', '2'])
     if '-opus' in ofn:
         codec_options.extend(['-c:a', 'libopus'])
-    set_ffmpeg_codec = not (
-        ytopts['postprocessor_args'] and
-        ytopts['postprocessor_args']['modifychapters+ffmpeg']
+    set_ffmpeg_codec = (
+        'modifychapters+ffmpeg' not in ytopts['postprocessor_args']
     )
     if set_ffmpeg_codec and codec_options:
         ytopts['postprocessor_args'].update({

@@ -1,5 +1,6 @@
 
 from django import forms, VERSION as DJANGO_VERSION
+from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
 from .models import Source
@@ -29,16 +30,18 @@ SourceForm = forms.modelform_factory(
     },
 )
 
+def source_clean_media_format(self):
+    data = self.cleaned_data.get('media_format', '').strip()
+    return data or getattr(settings, 'MEDIA_FORMATSTR', settings.MEDIA_FORMATSTR_DEFAULT)
+
+SourceForm.clean_media_format = source_clean_media_format
+
 class ValidateSourceForm(forms.Form):
 
-    source_type = forms.CharField(
-        max_length=1,
-        required=True,
-        widget=forms.HiddenInput()
-    )
     source_url = forms.URLField(
         label=_('Source URL'),
         required=True,
+        widget=forms.URLInput(attrs={'placeholder': 'https://www.youtube.com/@channelname'}),
         **_assume_scheme,
     )
 

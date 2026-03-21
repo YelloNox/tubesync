@@ -34,10 +34,11 @@ from .tasks import (
     map_task_to_instance, get_error_message,
     get_running_tasks, get_media_download_task, get_source_completed_tasks,
     check_source_directory_exists, index_source, download_media_image, download_media_file,
+    refresh_formats,
 )
 from .choices import (Val, MediaServerType, SourceResolution, IndexSchedule,
                         YouTube_SourceType, youtube_long_source_types,
-                        youtube_help, youtube_validation_urls)
+                        youtube_validation_urls)
 from . import signals # noqa
 from . import youtube
 
@@ -45,16 +46,31 @@ from . import youtube
 def get_waiting_tasks():
     huey_queue_names = (DJANGO_HUEY or {}).get('queues', {})
     huey_queues = list(map(get_queue, huey_queue_names))
-    huey_task_ids = {
-        str(t.id) for q in huey_queues for t in set(
-            q.pending()
-        ).union(
-            q.scheduled()
-        )
-    }
-    return TaskHistory.objects.filter(
-        task_id__in=huey_task_ids,
-    )
+
+    # Fast Guard: Check counts across all Huey queues
+    if not any(0 < (q.pending_count() + q.scheduled_count()) for q in huey_queues):
+        return TaskHistory.objects.none()
+
+    def id_generator(queue):
+        # Stream pending tasks
+        for task in queue.pending():
+            yield str(task.id)
+            
+        # Stream scheduled tasks
+        for task in queue.scheduled():
+            yield str(task.id)
+
+    def deduplicating_id_generator():
+        seen = set()
+        for q in huey_queues:
+            for tid in id_generator(q):
+                if tid not in seen:
+                    seen.add(tid)
+                    yield tid
+        seen.clear()
+            
+    huey_task_ids = deduplicating_id_generator()
+    return TaskHistory.objects.from_huey_ids(huey_task_ids)
 
 
 class DashboardView(TemplateView):
@@ -154,7 +170,7 @@ class SourcesView(ListView):
             url = append_uri_params(url, {'message': 'source-refreshed'})
             return HttpResponseRedirect(url)
         else:
-            return super().get(self, *args, **kwargs)    
+            return super().get(self, *args, **kwargs)
 
     def __init__(self, *args, **kwargs):
         self.message = None
@@ -189,14 +205,9 @@ class ValidateSourceView(FormView):
     template_name = 'sync/source-validate.html'
     form_class = ValidateSourceForm
     errors = {
-        'invalid_source': _('Invalid type for the source.'),
-        'invalid_url': _('Invalid URL, the URL must for a "{item}" must be in '
-                         'the format of "{example}". The error was: {error}.'),
+        'invalid_url': _('That URL does not match any supported formats.'),
     }
     source_types = youtube_long_source_types
-    help_item = dict(YouTube_SourceType.choices)
-    help_texts = youtube_help.get('texts')
-    help_examples = youtube_help.get('examples')
     validation_urls = youtube_validation_urls
     prepopulate_fields = {
         Val(YouTube_SourceType.CHANNEL): ('source_type', 'key', 'name', 'directory'),
@@ -210,53 +221,25 @@ class ValidateSourceView(FormView):
         self.key = ''
         super().__init__(*args, **kwargs)
 
-    def dispatch(self, request, *args, **kwargs):
-        self.source_type_str = kwargs.get('source_type', '').strip().lower()
-        self.source_type = self.source_types.get(self.source_type_str, None)
-        if not self.source_type:
-            raise Http404
-        return super().dispatch(request, *args, **kwargs)
-
-    def get_initial(self):
-        initial = super().get_initial()
-        initial['source_type'] = self.source_type
-        return initial
-
-    def get_context_data(self, *args, **kwargs):
-        data = super().get_context_data(*args, **kwargs)
-        data['source_type'] = self.source_type_str
-        data['help_item'] = self.help_item.get(self.source_type)
-        data['help_text'] = self.help_texts.get(self.source_type)
-        data['help_example'] = self.help_examples.get(self.source_type)
-        return data
-
     def form_valid(self, form):
         # Perform extra validation on the URL, we need to extract the channel name or
         # playlist ID and check they are valid
-        source_type = form.cleaned_data['source_type']
-        if source_type not in YouTube_SourceType.values:
-            form.add_error(
-                'source_type',
-                ValidationError(self.errors['invalid_source'])
-            )
         source_url = form.cleaned_data['source_url']
-        validation_url = self.validation_urls.get(source_type)
-        try:
-            self.key = validate_url(source_url, validation_url)
-        except ValidationError as e:
-            error = self.errors.get('invalid_url')
-            item = self.help_item.get(self.source_type)
-            form.add_error(
-                'source_url',
-                ValidationError(error.format(
-                    item=item,
-                    example=validation_url['example'],
-                    error=e.message)
-                )
-            )
-        if form.errors:
-            return super().form_invalid(form)
-        return super().form_valid(form)
+        for source_type in YouTube_SourceType.values:
+            validation_url = self.validation_urls.get(source_type)
+            try:
+                self.key = validate_url(source_url, validation_url)
+                self.source_type = source_type
+                for long_type_str, st_val in youtube_long_source_types.items():
+                    if st_val == source_type:
+                        self.source_type_str = long_type_str
+                        break
+                return super().form_valid(form)
+            except ValidationError:
+                continue
+        # Source type wasn't detected - presumably it's not a valid URL
+        form.add_error('source_url', ValidationError(self.errors['invalid_url']))
+        return super().form_invalid(form)
 
     def get_success_url(self):
         url = reverse_lazy('sync:add-source')
@@ -354,6 +337,10 @@ class AddSourceView(EditSourceMixin, CreateView):
         super().__init__(*args, **kwargs)
 
     def dispatch(self, request, *args, **kwargs):
+        # Inject the adjustable media format default
+        self.prepopulated_data['media_format'] = getattr(
+            settings, 'MEDIA_FORMATSTR', settings.MEDIA_FORMATSTR_DEFAULT
+        )
         source_type = request.GET.get('source_type', '')
         if source_type and source_type in YouTube_SourceType.values:
             self.prepopulated_data['source_type'] = source_type
@@ -614,7 +601,7 @@ class MediaThumbView(DetailView):
         if media.thumb_file_exists:
             thumb_path = pathlib.Path(media.thumb.path)
             thumb = thumb_path.read_bytes()
-            content_type = 'image/jpeg' 
+            content_type = 'image/jpeg'
         else:
             # No thumbnail on disk, return a blank 1x1 gif
             thumb = b64decode('R0lGODlhAQABAIABAP///wAAACH5BAEKAAEALAA'
@@ -622,7 +609,7 @@ class MediaThumbView(DetailView):
             content_type = 'image/gif'
             max_age = 600
         response = HttpResponse(thumb, content_type=content_type)
-        
+
         response['Cache-Control'] = f'public, max-age={max_age}'
         return response
 
@@ -656,6 +643,15 @@ class MediaItemView(DetailView):
         combined_exact, combined_format = self.object.get_best_combined_format()
         audio_exact, audio_format = self.object.get_best_audio_format()
         video_exact, video_format = self.object.get_best_video_format()
+        data['combined_format_dict'] = {'id': str(combined_format)}
+        data['audio_format_dict'] = {'id': str(audio_format)}
+        data['video_format_dict'] = {'id': str(video_format)}
+        context_keys = { k for k in data.keys() if k.endswith('_format_dict') }
+        for fmt in self.object.iter_formats():
+            for k in context_keys:
+                v = data[k]
+                if v.get('id') == fmt.get('id'):
+                    data[k] = fmt
         task = get_media_download_task(self.object.pk)
         data['task'] = task
         data['download_state'] = self.object.get_download_state(task)
@@ -716,12 +712,27 @@ class MediaRedownloadView(FormView, SingleObjectMixin):
         # Try to download manually, when can_download was true
         media = self.object
         if media.can_download:
+            attempted_key = '_refresh_formats_attempted'
+            media.save_to_metadata(attempted_key, 1)
+            refreshed_key = 'formats_epoch'
+            media.save_to_metadata(refreshed_key, 1)
+            TaskHistory.schedule(
+                refresh_formats,
+                str(media.pk),
+                priority=90,
+                remove_duplicates=False,
+                retries=1,
+                retry_delay=300,
+                vn_fmt=_('Refreshing formats (manually) for "{}"'),
+                vn_args=(media.key,),
+            )
             TaskHistory.schedule(
                 download_media_file,
                 str(media.pk),
                 override=True,
                 priority=90,
                 remove_duplicates=True,
+                delay=10,
                 retries=3,
                 retry_delay=600,
                 vn_fmt=_('Downloading media (manually) for "{}"'),
@@ -893,6 +904,8 @@ class TasksView(ListView):
     messages = {
         'filter': _('Viewing tasks filtered for source: <strong>{name}</strong>'),
         'reset': _('All tasks have been reset'),
+        'revoked': _('Revoked task: {task_id}'),
+        'scheduled': _('Scheduled task: {name}'),
     }
 
     def __init__(self, *args, **kwargs):
@@ -909,11 +922,26 @@ class TasksView(ListView):
                 self.filter_source = Source.objects.get(pk=filter_by)
             except Source.DoesNotExist:
                 self.filter_source = None
-            if not message_key or 'filter' == message_key:
-                message = self.messages.get('filter', '')
-                self.message = message.format(
-                    name=self.filter_source.name
-                )
+            else:
+                if not message_key or 'filter' == message_key:
+                    message = self.messages.get('filter', '')
+                    self.message = message.format(
+                        name=self.filter_source.name
+                    )
+
+        if message_key in ('revoked', 'scheduled'):
+            fmt_vars = dict(
+                pk=request.GET.get('pk', 'Unknown'),
+                task_id=request.GET.get('task_id', 'Unknown'),
+            )
+            try:
+                task = TaskHistory.objects.get(pk=fmt_vars['pk'])
+            except TaskHistory.DoesNotExist:
+                fmt_vars['name'] = fmt_vars['pk']
+            else:
+                fmt_vars['name'] = task.verbose_name or task.task_id or task.pk
+                fmt_vars['task_id'] = task.task_id
+            self.message = self.message.format(**fmt_vars)
 
         return super().dispatch(request, *args, **kwargs)
 
@@ -966,7 +994,7 @@ class TasksView(ListView):
                     continue
             add_to_task(task)
             data['running'].append(task)
-            
+
         # show all the errors when they fit on one page
         if (data['total_errors'] + len(data['running'])) < self.paginate_by:
             for task in errors_qs:
@@ -1022,6 +1050,37 @@ class TasksView(ListView):
                 self.kwargs[page_kwarg] = 'last'
         return super().paginate_queryset(queryset, page_size)
 
+    def get(self, *args, **kwargs):
+        path = args[0].path
+        if path.startswith('/task/') and path.endswith('/cancel'):
+            try:
+                task = TaskHistory.objects.get(pk=kwargs["pk"])
+            except TaskHistory.DoesNotExist:
+                return HttpResponseNotFound()
+            else:
+                huey_queue_names = (DJANGO_HUEY or {}).get('queues', {})
+                huey_queues = { q.name: q for q in map(get_queue, huey_queue_names) }
+                q = huey_queues.get(task.queue)
+                if q is None:
+                    msg = f'TasksView: queue not found: {task.pk=} {task.queue=}'
+                    log.warning(msg)
+                    return HttpResponseNotFound()
+                # revoke the task we want to cancel
+                q.revoke_by_id(id=task.task_id, revoke_once=True)
+                vn = task.verbose_name or task.task_id or task.pk
+                if not vn.startswith('[revoked] '):
+                    task.verbose_name = f'[revoked] {vn}'
+                    task.save()
+                return HttpResponseRedirect(append_uri_params(
+                    reverse_lazy('sync:tasks'),
+                    dict(
+                        message='revoked',
+                        pk=str(task.pk),
+                        task_id=str(task.task_id),
+                    ),
+                ))
+        else:
+            return super().get(self, *args, **kwargs)
 
 class CompletedTasksView(ListView):
     '''
@@ -1153,12 +1212,13 @@ class TaskScheduleView(FormView, SingleObjectMixin):
             dict(
                 message='scheduled',
                 pk=str(self.object.pk),
+                task_id=str(self.object.task_id),
             ),
         )
 
     def form_valid(self, form):
         when = form.cleaned_data.get('when')
-  
+
         if not isinstance(when, self.now.__class__):
             form.add_error(
                 'when',
@@ -1177,17 +1237,15 @@ class TaskScheduleView(FormView, SingleObjectMixin):
         if form.errors:
             return super().form_invalid(form)
 
-        huey_queue_names = (DJANGO_HUEY or {}).get('queues', {})
-        huey_queues = list(map(get_queue, huey_queue_names))
         pk = self.object.pk
         queue = self.object.queue
         task_id = self.object.task_id
-        matching = { q for q in huey_queues if q.name == queue }
-        try:
-            q = matching.pop()
-        except KeyError as e:
+        huey_queue_names = (DJANGO_HUEY or {}).get('queues', {})
+        huey_queues = { q.name: q for q in map(get_queue, huey_queue_names) }
+        q = huey_queues.get(queue)
+        if q is None:
             msg = f'TaskScheduleView: queue not found: {pk=} {queue=}'
-            log.exception(msg, exc_info=e)
+            log.warning(msg)
         else:
             eta = max(self.now, when)
             if q.reschedule(task_id, eta):

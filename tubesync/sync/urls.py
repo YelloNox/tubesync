@@ -29,7 +29,7 @@ urlpatterns = [
     ),
 
     path(
-        'source-validate/<slug:source_type>',
+        'source-validate',
         ValidateSourceView.as_view(),
         name='validate-source',
     ),
@@ -120,6 +120,12 @@ urlpatterns = [
         'tasks',
         TasksView.as_view(),
         name='tasks',
+    ),
+
+    path(
+        'task/<int:pk>/cancel',
+        TasksView.as_view(),
+        name='revoke-task',
     ),
 
     path(

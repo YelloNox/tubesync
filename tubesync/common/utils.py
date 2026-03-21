@@ -1,4 +1,5 @@
 import cProfile
+import difflib
 import emoji
 import gc
 import io
@@ -8,6 +9,7 @@ import string
 import time
 from django.core.paginator import Paginator
 from functools import partial
+from itertools import chain
 from operator import attrgetter, itemgetter
 from pathlib import Path
 from urllib.parse import urlunsplit, urlencode, urlparse
@@ -68,6 +70,23 @@ def glob_quote(filestr, /):
         raise TypeError(f'expected a str, got "{type(filestr)}"')
 
     return filestr.translate(str.maketrans(_glob_specials))
+
+
+def is_empty_iterator(iterator):
+    """
+    Checks if an iterator is empty without fully consuming it.
+    Returns: (is_empty_boolean, iterator)
+    """
+    returned_iterator = iterator
+    try:
+        first_item = next(iterator)
+    except StopIteration:
+        return True, iter([])
+    else:
+        # Put the first item back at the start of a new iterator
+        # Chaining the single item with the original remaining stream
+        returned_iterator = chain([first_item], iterator)
+    return False, returned_iterator
 
 
 def list_of_dictionaries(arg_list, /, arg_function=lambda x: x):
@@ -292,6 +311,37 @@ def remove_enclosed(haystack, /, open='[', close=']', sep=' ', *, valid=None, st
         if invalid:
             return haystack
     return haystack[:o] + haystack[len(n)+c:]
+
+
+def resolve_priority_order(user_input, master_list, cutoff=0.6):
+    """
+    Normalizes and validates a user's preferred order against a master set.
+    """
+    resolved = []
+    # Index for case-insensitive and underscore/hyphen normalization
+    norm_map = {m.lower().replace('_', '-'): m for m in master_list}
+
+    for item in user_input:
+        # 1. Exact match (fastest)
+        if item in master_list:
+            if item not in resolved:
+                resolved.append(item)
+            continue
+
+        # 2. Normalized match (handles 'en_US' -> 'en-US' or 'EN-US' -> 'en-US')
+        norm_item = item.lower().replace('_', '-')
+        if norm_item in norm_map:
+            match = norm_map[norm_item]
+            if match not in resolved:
+                resolved.append(match)
+            continue
+
+        # 3. Fuzzy match (handles 'English' -> 'en' or 'USA' -> 'en-US')
+        matches = difflib.get_close_matches(item, master_list, n=1, cutoff=cutoff)
+        if matches and matches[0] not in resolved:
+            resolved.append(matches[0])
+
+    return resolved
 
 
 def django_queryset_generator(query_set, /, *,

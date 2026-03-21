@@ -5,7 +5,7 @@
 ## YouTube Proof-of-Origin Token plugin
 
 To generate tokens TubeSync is using a plugin for `yt-dlp` from:
-* https://github.com/Brainicism/bgutil-ytdlp-pot-provider/tree/1.2.2/plugin/yt_dlp_plugins/extractor/
+* https://github.com/Brainicism/bgutil-ytdlp-pot-provider/tree/1.3.1/plugin/yt_dlp_plugins/extractor/
 
 #### Addition of plugin support
 
@@ -15,7 +15,7 @@ Support for using the plugin was added in: https://github.com/meeb/tubesync/pull
 
 This plugin communicates with a web service to retrieve tokens, for which it uses a default URL of: `http://127.0.0.1:4416`
 
-Because for TubeSync `openresty` or `nginx` are what most users will connect to with their web browser, the [configuration](../config/root/etc/nginx/token_server.conf) to listen on port `4416` has been added.
+Because for TubeSync `openresty` is what most users will connect to with their web browser, the [configuration](../config/root/etc/nginx/token_server.conf) to listen on port `4416` has been added.
 
 If you are using another web server instead, you should configure similar proxying of the requests, or configure a different URL for the plugin to use.
 
@@ -35,14 +35,14 @@ If you are using another web server instead, you should configure similar proxyi
 
 #### Running the web service container the plugin communicates with
 
-Docker image: `brainicism/bgutil-ytdlp-pot-provider:1.2.2`
+Docker image: `brainicism/bgutil-ytdlp-pot-provider:1.3.1`
 
 ```sh
 $ docker run -d \
     --name bgutil-ytdlp-pot-service \
     -p 4416:4416 \
     --restart unless-stopped \
-    brainicism/bgutil-ytdlp-pot-provider:1.2.2
+    brainicism/bgutil-ytdlp-pot-provider:1.3.1
 ```
 
 #### Configure the plugin using environment variables
@@ -108,5 +108,4 @@ Added environment variables:
 - TUBESYNC_POT_IPADDR
 - TUBESYNC_POT_PORT
 - TUBESYNC_POT_HTTPS (use https:// when set)
-- YT_POT_BGUTIL_BASE_URL (`youtubepot-bgutilhttp:base_url`) (not set by the user)
 

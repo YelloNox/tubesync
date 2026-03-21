@@ -109,6 +109,7 @@ $ docker run \
   -v /some/directory/tubesync-config:/config \
   -v /some/directory/tubesync-downloads:/downloads \
   -p 4848:4848 \
+  --stop-timeout 1800 \
   ghcr.io/meeb/tubesync:latest
 ```
 
@@ -125,6 +126,7 @@ services:
     image: ghcr.io/meeb/tubesync:latest
     container_name: tubesync
     restart: unless-stopped
+    stop_grace_period: 30m
     ports:
       - 4848:4848
     volumes:
@@ -233,6 +235,9 @@ under the "media servers" tab.
 
 # Logging and debugging
 
+> [!TIP]
+> Even more detailed logs are produced when the environment variable `TUBESYNC_DEBUG` is set to `True`.
+
 TubeSync outputs useful logs, errors and debugging information to the console. You can
 view these with:
 
@@ -240,7 +245,7 @@ view these with:
 $ docker logs --follow tubesync
 ```
 
-To include logs with an issue report, please exteact a file and attach it to the issue.
+To include logs with an issue report, please extract a file and attach it to the issue.
 The command below creates the `TubeSync.logs.txt` file with the logs from the `tubesync` container:
 
 ```bash
@@ -331,10 +336,11 @@ Notable libraries and software used:
  * [Django](https://www.djangoproject.com/)
  * [yt-dlp](https://github.com/yt-dlp/yt-dlp)
  * [ffmpeg](https://ffmpeg.org/)
+ * [QuickJS](https://bellard.org/quickjs/)
  * [Django Huey](https://github.com/gaiacoop/django-huey)
  * [Huey](https://github.com/coleifer/huey)
  * [django-sass](https://github.com/coderedcorp/django-sass/)
- * The container bundles with `s6-init` and `nginx`
+ * The container bundles with `s6-init` and `openresty`
 
 See the [Pipfile](https://github.com/meeb/tubesync/blob/main/Pipfile) for a full list.
 
