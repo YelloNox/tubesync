@@ -2,7 +2,7 @@
 # check=error=true
 
 ARG BGUTIL_YTDLP_POT_PROVIDER_VERSION="1.3.1"
-ARG FFMPEG_VERSION="N"
+ARG FFMPEG_VERSION="master-latest"
 ARG YTDLP_EJS_VERSION="0.3.2"
 
 ARG ASFALD_VERSION="0.6.0"
@@ -235,7 +235,7 @@ RUN set -eu ; \
       $2 ~ /^[*]?'"${FFMPEG_PREFIX_FILE}"'/ && /-'"${FFMPEG_ARCH}"'-/ { $1=""; print; } \
       ' "${DESTDIR}/${FFMPEG_FILE_SUMS}") ; \
     do \
-        url="${FFMPEG_URL}/${url# }" ; \
+        url="${FFMPEG_URL}/${url}" ; \
         TMPDIR="${DESTDIR}" asfald-latest -qv -- "${url}" ; \
     done ; \
     unset -v url ; \
