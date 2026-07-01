@@ -459,10 +459,14 @@ class Media(models.Model):
             if not is_audio_download and vcodec:
                 vcodec = vcodec.lower()
                 fmt.append(vcodec)
+            else:
+                vcodec = ''
             acodec = self.downloaded_audio_codec
             if acodec:
                 acodec = acodec.lower()
                 fmt.append(acodec)
+            else:
+                acodec = ''
             if not is_audio_download:
                 fps = str(self.downloaded_fps)
                 if fps:
