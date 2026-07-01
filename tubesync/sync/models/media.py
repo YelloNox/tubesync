@@ -455,12 +455,13 @@ class Media(models.Model):
                 resolution = self.downloaded_format.lower()
             if resolution:
                 fmt.append(resolution)
-            if not is_audio_download:
-                vcodec = self.downloaded_video_codec.lower()
-            if vcodec:
+            vcodec = self.downloaded_video_codec
+            if not is_audio_download and vcodec:
+                vcodec = vcodec.lower()
                 fmt.append(vcodec)
-            acodec = self.downloaded_audio_codec.lower()
+            acodec = self.downloaded_audio_codec
             if acodec:
+                acodec = acodec.lower()
                 fmt.append(acodec)
             if not is_audio_download:
                 fps = str(self.downloaded_fps)
