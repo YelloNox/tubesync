@@ -1,4 +1,5 @@
 import datetime
+import subprocess
 import time
 import uuid
 from functools import partial, wraps
@@ -179,6 +180,40 @@ def h_q_tuple(q, /):
         h_q_dict(q),
     )
 
+def start_consumer(queue_name):
+    assert isinstance(queue_name, str), type(queue_name)
+    svc_name = queue_name.replace('_', '-')
+    svc_dir = Path('/run') / 'service' / svc_name
+
+    try:
+        if not all((
+            svc_dir.is_dir(),
+            (svc_dir / 'supervise').is_dir(),
+            (svc_dir / 'supervise' / 'control').is_fifo(),
+        )):
+            return
+    except PermissionError:
+        pass
+    else:
+        subprocess.Popen(
+            [ '/command/s6-svc', '-U', str(svc_dir) ],
+            stdout=-1, stderr=-1, start_new_session=True,
+        )
+
+def h_q_reset_maint_func(queue, /, exception=None, status=None):
+        if status is None:
+            return
+        elif 'started' == status:
+            start_consumer(queue.name)
+        elif 'exception' == status and exception is not None:
+            # log, but do not raise an exception
+            from huey.api import logger
+            logger.error(
+                f'{queue.name}: maintenance function exception: {exception}'
+            )
+            return
+        return True
+
 # Configuration convenience helpers
 
 def h_q_reset_tasks(q, /, *, maint_func=None):
@@ -212,7 +247,6 @@ def h_q_reset_tasks(q, /, *, maint_func=None):
             maint_result = maint_func(q, status='started')
         except Exception as exc:
             maint_result = maint_func(q, exception=exc, status='exception')
-            pass
         finally:
             maint_func(q, status='finished')
     # clear everything now that we are done
@@ -335,17 +369,26 @@ def on_executing_remove_duplicates(signal_name, task_obj, exception_obj=None, /,
         if not th.remove_duplicates:
             return
 
-    waiting = [
-        t
-        for t in huey.pending() + huey.scheduled()
-        if task_obj.id != t.id and
-        task_obj.name == t.name and
-        task_obj.data == t.data and
-        task_obj.priority >= t.priority and
-        task_obj.retries <= t.retries
-    ]
-    for t in waiting:
-        huey.revoke_by_id(t.id, revoke_once=True)
+    def task_generator(queue):
+        for t in queue.pending():
+            yield t
+        for t in queue.scheduled():
+            yield t
+
+    def waiting_id_generator(queue, task_obj):
+        for t in task_generator(queue):
+            matches = all((
+                task_obj.id != t.id,
+                task_obj.name == t.name,
+                task_obj.data == t.data,
+                task_obj.priority >= t.priority,
+                task_obj.retries <= t.retries,
+            ))
+            if matches:
+                yield t.id
+
+    for task_id in waiting_id_generator(queue=huey, task_obj=task_obj):
+        huey.revoke_by_id(task_id, revoke_once=True)
 
 def on_interrupted(signal_name, task_obj, exception_obj=None, /, *, huey=None):
     if signals.SIGNAL_INTERRUPTED != signal_name:
