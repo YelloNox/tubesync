@@ -1,7 +1,7 @@
 from django import VERSION as DJANGO_VERSION
 from pathlib import Path
 from common.huey import sqlite_tasks
-from common.logs import syslog
+from common.logs import level_from_environment, syslog
 from common.utils import getenv
 from sync.choices import TaskQueue
 
@@ -11,7 +11,7 @@ CONFIG_BASE_DIR = BASE_DIR
 DOWNLOADS_BASE_DIR = BASE_DIR
 
 
-VERSION = '0.18.2'
+VERSION = '0.18.3'
 DEBUG = 'true' == getenv('TUBESYNC_DEBUG').strip().lower()
 ALLOWED_HOSTS = []
 # This is not ever meant to be a public web interface so this isn't too critical
@@ -159,7 +159,7 @@ LOGGING = {
         },
         'stderr': {
             'class': 'logging.StreamHandler',
-            'level': 'DEBUG' if DEBUG else 'INFO',
+            'level': 'DEBUG' if DEBUG else level_from_environment('TUBESYNC_LOG_LEVEL', 'INFO'),
             'formatter': 'common',
         },
         'stderr_worker_process': {
@@ -426,8 +426,7 @@ except:
     MAX_RUN_TIME = 3600
 
 # Tasks scheduled with `background_task` need a chance to finish
-if MAX_RUN_TIME < 600:
-    MAX_RUN_TIME = 600
+MAX_RUN_TIME = max(600, MAX_RUN_TIME)
 
 DOWNLOAD_MEDIA_DELAY = 1 + round(MAX_RUN_TIME / 100)
 
