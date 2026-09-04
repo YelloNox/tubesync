@@ -290,90 +290,48 @@ ARG FFMPEG_URL="https://github.com/yt-dlp/FFmpeg-Builds/releases/download/${FFMP
 
 ARG DESTDIR="/downloaded"
 ARG TARGETARCH
-
 ADD "${FFMPEG_URL}/${FFMPEG_FILE_SUMS}" "${DESTDIR}/"
+RUN set -eu ; \
+\
+    decide_arch() { \
+        case "${TARGETARCH}" in \
+            (amd64) printf -- 'linux64' ;; \
+            (arm64) printf -- 'linuxarm64' ;; \
+        esac ; \
+    } ; \
+\
+    FFMPEG_ARCH="$(decide_arch)" ; \
+    FFMPEG_PREFIX_FILE="$( printf -- '%s' "${FFMPEG_PREFIX_FILE}" | cut -d '-' -f 1,2 )" ; \
+    cd "${DESTDIR}" && \
+    for url in $(awk ' \
+      $2 ~ /^[*]?'"${FFMPEG_PREFIX_FILE}"'/ && /-'"${FFMPEG_ARCH}"'-/ { $1=""; print; } \
+      ' "${DESTDIR}/${FFMPEG_FILE_SUMS}") ; \
+    do \
+        url="${FFMPEG_URL}/${url}" ; \
+        TMPDIR="${DESTDIR}" asfald-latest -qv -- "${url}" ; \
+    done ; \
+    unset -v url ; \
+\
+    decide_expected() { \
+        case "${TARGETARCH}" in \
+            (amd64) printf -- '%s' "${FFMPEG_CHECKSUM_AMD64}" ;; \
+            (arm64) printf -- '%s' "${FFMPEG_CHECKSUM_ARM64}" ;; \
+        esac ; \
+    } ; \
+\
+    FFMPEG_HASH="$(decide_expected)" ; \
+\
+    if [ -n "${FFMPEG_HASH}" ] ; \
+    then \
+        printf -- '%s *%s\n' "${FFMPEG_HASH}" "${FFMPEG_PREFIX_FILE}"*-"${FFMPEG_ARCH}"-*"${FFMPEG_SUFFIX_FILE}" >> /tmp/SUMS ; \
+        "${CHECKSUM_ALGORITHM}sum" --check --warn --strict /tmp/SUMS || exit ; \
+    fi ; \
+    "${CHECKSUM_ALGORITHM}sum" --check --warn --strict --ignore-missing "${DESTDIR}/${FFMPEG_FILE_SUMS}" ; \
+\
+    mkdir -v -p "/verified/${TARGETARCH}" ; \
+    ln -v "${FFMPEG_PREFIX_FILE}"*-"${FFMPEG_ARCH}"-*"${FFMPEG_SUFFIX_FILE}" "/verified/${TARGETARCH}/" ; \
+    rm -rf "${DESTDIR}" ;
 
-# Install wget if not available
-RUN if ! command -v wget >/dev/null 2>&1; then \
-        apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*; \
-    fi
-
-RUN set -eux; \
-    # Debug: Show what we're working with
-    echo "=== Environment ==="; \
-    echo "TARGETARCH: ${TARGETARCH}"; \
-    echo "FFMPEG_PREFIX_FILE: ${FFMPEG_PREFIX_FILE}"; \
-    echo "FFMPEG_SUFFIX_FILE: ${FFMPEG_SUFFIX_FILE}"; \
-    echo "FFMPEG_URL: ${FFMPEG_URL}"; \
-    echo "DESTDIR: ${DESTDIR}"; \
-    echo "=== Checksums file content ==="; \
-    cat "${DESTDIR}/${FFMPEG_FILE_SUMS}"; \
-    \
-    # Determine architecture mapping
-    case "${TARGETARCH}" in \
-        amd64) FFMPEG_ARCH="linux64" ;; \
-        arm64) FFMPEG_ARCH="linuxarm64" ;; \
-        *) echo "ERROR: Unsupported architecture ${TARGETARCH}"; exit 1 ;; \
-    esac; \
-    echo "FFMPEG_ARCH: ${FFMPEG_ARCH}"; \
-    \
-    # Extract the actual filename from checksums (handle both with and without leading *)
-    cd "${DESTDIR}"; \
-    \
-    # Try multiple patterns to find the correct file
-    FFMPEG_FILE=$(awk -v prefix="${FFMPEG_PREFIX_FILE}" -v arch="${FFMPEG_ARCH}" \
-        '$2 ~ prefix && $2 ~ arch {print $2; exit}' \
-        "${FFMPEG_FILE_SUMS}" 2>/dev/null || echo ""); \
-    \
-    if [ -z "${FFMPEG_FILE}" ]; then \
-        # Try with wildcard pattern matching
-        FFMPEG_FILE=$(awk -v prefix="${FFMPEG_PREFIX_FILE}" -v arch="${FFMPEG_ARCH}" \
-            '$2 ~ "^[*]?" prefix && $2 ~ "-" arch "-" {print $2; exit}' \
-            "${FFMPEG_FILE_SUMS}" 2>/dev/null || echo ""); \
-    fi; \
-    \
-    if [ -z "${FFMPEG_FILE}" ]; then \
-        echo "ERROR: Could not find matching file for prefix='${FFMPEG_PREFIX_FILE}' and arch='${FFMPEG_ARCH}'"; \
-        echo "Available files in checksums:"; \
-        cat "${FFMPEG_FILE_SUMS}"; \
-        exit 1; \
-    fi; \
-    \
-    echo "Found file: ${FFMPEG_FILE}"; \
-    \
-    # Download the file using wget (more reliable than asfald-latest)
-    echo "Downloading: ${FFMPEG_URL}/${FFMPEG_FILE}"; \
-    wget -q --show-progress "${FFMPEG_URL}/${FFMPEG_FILE}" -O "${FFMPEG_FILE}" || \
-    wget -q --show-progress "${FFMPEG_URL}/${FFMPEG_FILE}" -O "${FFMPEG_FILE}" || \
-    { echo "Download failed!"; exit 1; }; \
-    \
-    # Verify the download
-    if [ ! -f "${FFMPEG_FILE}" ] || [ ! -s "${FFMPEG_FILE}" ]; then \
-        echo "ERROR: Downloaded file is empty or missing"; \
-        exit 1; \
-    fi; \
-    \
-    echo "Download successful: $(ls -lh ${FFMPEG_FILE})"; \
-    \
-    # Verify the checksum
-    echo "Verifying checksum for: ${FFMPEG_FILE}"; \
-    grep "${FFMPEG_FILE}" "${FFMPEG_FILE_SUMS}" | "${CHECKSUM_ALGORITHM}sum" --check --strict || \
-    { \
-        echo "Checksum verification failed!"; \
-        echo "Expected: $(grep "${FFMPEG_FILE}" "${FFMPEG_FILE_SUMS}")"; \
-        echo "Actual: $("${CHECKSUM_ALGORITHM}sum" "${FFMPEG_FILE}")"; \
-        exit 1; \
-    }; \
-    \
-    # Create symlink
-    mkdir -v -p "/verified/${TARGETARCH}"; \
-    ln -v "${DESTDIR}/${FFMPEG_FILE}" "/verified/${TARGETARCH}/"; \
-    \
-    # Cleanup
-    # rm -rf "${DESTDIR}"  # Commented out for debugging
-
-# Debug: Show what was created
-RUN echo "=== Verified files ===" && ls -la "/verified/${TARGETARCH}/" || echo "No files found"
 FROM alpine:${ALPINE_VERSION} AS ffmpeg-extracted
 COPY --from=ffmpeg-download /verified /verified
 
