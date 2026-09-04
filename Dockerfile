@@ -329,7 +329,7 @@ RUN set -eu ; \
     "${CHECKSUM_ALGORITHM}sum" --check --warn --strict --ignore-missing "${DESTDIR}/${FFMPEG_FILE_SUMS}" ; \
 \
     mkdir -v -p "/verified/${TARGETARCH}" ; \
-    ln -v "${FFMPEG_PREFIX_FILE}"*-"${FFMPEG_ARCH}"-*"${FFMPEG_SUFFIX_FILE}" "/verified/${TARGETARCH}/" ; \
+    ln -v "${FFMPEG_PREFIX_FILE}"*-"${FFMPEG_ARCH}"-"${FFMPEG_SUFFIX_FILE}" "/verified/${TARGETARCH}/" ; \
     rm -rf "${DESTDIR}" ;
 
 FROM alpine:${ALPINE_VERSION} AS ffmpeg-extracted
