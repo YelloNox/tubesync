@@ -291,7 +291,7 @@ ARG FFMPEG_URL="https://github.com/yt-dlp/FFmpeg-Builds/releases/download/autobu
 
 ARG DESTDIR="/downloaded"
 ARG TARGETARCH
-ADD "${FFMPEG_URL}/${FFMPEG_FILE_SUMS}" "${DESTDIR}/"
+ADD "${FFMPEG_URL}${FFMPEG_FILE_SUMS}" "${DESTDIR}/"
 RUN set -eu ; \
 \
     decide_arch() { \
