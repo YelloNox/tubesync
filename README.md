@@ -267,6 +267,7 @@ useful if you are manually installing TubeSync in some other environment. These 
 | TUBESYNC_DIRECTORY_PREFIX    | Enable `video` and `audio` directory prefixes in `/downloads` | True                                                                          |
 | TUBESYNC_SHRINK_NEW          | Filter unneeded information from newly retrieved metadata     | True                                                                          |
 | TUBESYNC_SHRINK_OLD          | Filter unneeded information from metadata loaded from the database | True                                                                     |
+| TUBESYNC_SAVE_MEDIA_AFTER_BULK_ACTION | Queue a `save_media` task per item changed by an admin bulk action | True                                                |
 | GUNICORN_WORKERS             | Number of `gunicorn` (web request) workers to spawn           | 3                                                                             |
 | LISTEN_HOST                  | IP address for `gunicorn` to listen on                        | 127.0.0.1                                                                     |
 | LISTEN_PORT                  | Port number for `gunicorn` to listen on                       | 8080                                                                          |
@@ -289,7 +290,7 @@ installing and running WSGI-based Python web applications before attempting this
    `tubesync/tubesync/local_settings.py` and edit it as appropriate
 5. Run migrations with `./manage.py migrate`
 6. Collect static files with `./manage.py collectstatic`
-6. Set up your prefered WSGI server, such as `gunicorn` pointing it to the application
+6. Set up your preferred WSGI server, such as `gunicorn` pointing it to the application
    in `tubesync/tubesync/wsgi.py`
 7. Set up your proxy server such as `nginx` and forward it to the WSGI server
 8. Check the web interface is working

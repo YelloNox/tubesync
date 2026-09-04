@@ -379,6 +379,7 @@ YOUTUBE_DEFAULTS = {
     },
     'postprocessor_args': {
         'videoremuxer+ffmpeg': ['-bsf:v', 'setts=pts=DTS'],
+        'merger+ffmpeg': ['-fflags', '+genpts'],
     },
     'js_runtimes': {
         'deno': {'path': None,},
@@ -391,6 +392,12 @@ YOUTUBE_INFO_SLEEP_REQUESTS = 1
 
 RENAME_ALL_SOURCES = True
 RENAME_SOURCES = list()
+
+
+# When True, admin bulk actions on Media queue a `save_media` task for each
+# changed item so flags are re-evaluated without waiting for the next source
+# edit or indexing run
+SAVE_MEDIA_AFTER_BULK_ACTION = False
 
 
 # An example for changing the ordering for audio tracks.
