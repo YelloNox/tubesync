@@ -24,7 +24,7 @@ ARG ALPINE_VERSION="latest"
 ARG DEBIAN_VERSION="13-slim"
 ARG OPENRESTY_DEBIAN_VERSION="bookworm"
 
-ARG FFMPEG_PREFIX_FILE="ffmpeg-S${FFMPEG_VERSION}"
+ARG FFMPEG_PREFIX_FILE="ffmpeg-${FFMPEG_VERSION}"
 ARG FFMPEG_SUFFIX_FILE=".tar.xz"
 
 ARG ASFALD_CHECKSUM_ALGORITHM="sha256"
@@ -307,7 +307,7 @@ RUN set -eu ; \
       $2 ~ /^[*]?'"${FFMPEG_PREFIX_FILE}"'/ && /-'"${FFMPEG_ARCH}"'-/ { $1=""; print; } \
       ' "${DESTDIR}/${FFMPEG_FILE_SUMS}") ; \
     do \
-        url="${FFMPEG_URL}/${url# }" ; \
+        url="${FFMPEG_URL}/${url}" ; \
         TMPDIR="${DESTDIR}" asfald-latest -qv -- "${url}" ; \
     done ; \
     unset -v url ; \
