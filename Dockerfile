@@ -2,7 +2,7 @@
 # check=error=true
 
 ARG BGUTIL_YTDLP_POT_PROVIDER_VERSION="1.3.2"
-ARG FFMPEG_VERSION="N"
+ARG FFMPEG_VERSION="latest"
 ARG YTDLP_EJS_VERSION="0.8.0"
 
 ARG ASFALD_VERSION="0.6.0"
@@ -338,19 +338,17 @@ COPY --from=ffmpeg-download /verified /verified
 ARG FFMPEG_PREFIX_FILE
 ARG FFMPEG_SUFFIX_FILE
 ARG TARGETARCH
-RUN set -eux; \
-    archive="$(echo /verified/"${TARGETARCH}"/"${FFMPEG_PREFIX_FILE}"*"${FFMPEG_SUFFIX_FILE}")"; \
-    echo "Using archive: ${archive}"; \
-    test -f "${archive}"; \
-    mkdir -v /extracted; \
-    cd /extracted; \
-    tar -tf "${archive}" \
-      | grep '/bin/\(ffmpeg\|ffprobe\)' > /tmp/files; \
+RUN set -eux ; \
+    mkdir -v /extracted ; \
+    cd /extracted ; \
+    ln -s "/verified/${TARGETARCH}"/"${FFMPEG_PREFIX_FILE}"*"${FFMPEG_SUFFIX_FILE}" "/tmp/ffmpeg${FFMPEG_SUFFIX_FILE}" ; \
+    tar -tf "/tmp/ffmpeg${FFMPEG_SUFFIX_FILE}" | grep '/bin/\(ffmpeg\|ffprobe\)' > /tmp/files ; \
     tar -xop \
       --strip-components=2 \
-      -f "${archive}" \
-      -T /tmp/files; \
-    ls -AlR /extracted;
+      -f "/tmp/ffmpeg${FFMPEG_SUFFIX_FILE}" \
+      -T /tmp/files ; \
+\
+    ls -AlR /extracted ;
 
 FROM scratch AS ffmpeg
 COPY --from=ffmpeg-extracted /extracted /usr/local/bin/
