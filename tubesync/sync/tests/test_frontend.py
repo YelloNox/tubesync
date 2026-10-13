@@ -18,6 +18,7 @@ from sync.choices import (
     YouTube_SourceType,
 )
 
+
 class FrontEndTestCase(TestCase):
     maxDiff = None
 
@@ -349,7 +350,7 @@ class FrontEndTestCase(TestCase):
         # Add some media
         test_minimal_metadata = all_test_metadata['minimal']
         before_dt = timezone.now()
-        past_date = timezone.make_aware(datetime(year=2000, month=1, day=1))  # noqa: DTZ001
+        past_date = timezone.make_aware(datetime(year=2000, month=1, day=1))
         test_media1 = Media.objects.create(
             key='mediakey1',
             source=test_source,
@@ -450,5 +451,3 @@ class FrontEndTestCase(TestCase):
         c = Client()
         response = c.get('/mediaservers')
         self.assertEqual(response.status_code, 200)
-
-

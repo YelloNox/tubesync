@@ -88,14 +88,14 @@ def msg_from_busybox_str(msg_str: str) -> common.Msg:
                 raise ValueError('too low')
             elif 4_194_304 < _pid:
                 raise ValueError('too high')
-        except Exception as e:
+        except (TypeError, ValueError) as e:
             raise ValueError(f'BusyBox (RFC 3164) invalid process ID: {e}')
 
     return common.Msg(
         facility=common.Facility(prival // 8),
         severity=common.Severity(prival % 8),
         version=None,
-        timestamp=dt.timestamp(),
+        timestamp=dt.astimezone(datetime.UTC).timestamp(),
         hostname=KNOWN_HOSTNAME,
         app_name=m['app_name'],
         procid=m.get('procid', None),
@@ -106,6 +106,7 @@ def msg_from_busybox_str(msg_str: str) -> common.Msg:
 
 
 # --- Test Suite ---
+
 
 def run_test_suite():
     h = KNOWN_HOSTNAME
@@ -140,6 +141,7 @@ def run_test_suite():
     for i, test in enumerate(test_cases, 1):
         try:
             res = msg_from_busybox_str(test)
+        # ruff: ignore[BLE001]
         except Exception as e:
             print(f'[FAIL] Case {i}: {e}')
         else:
@@ -151,6 +153,7 @@ def run_test_suite():
             msg_from_busybox_str(test)
         except ValueError:
             print(f'[PASS] Neg Case {i} correctly rejected')
+        # ruff: ignore[BLE001]
         except Exception as e:
             print(f'[FAIL] Neg Case {i}: {e}')
         else:

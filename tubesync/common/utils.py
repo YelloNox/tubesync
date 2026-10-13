@@ -138,8 +138,8 @@ def is_empty_iterator(iterator):
 def list_of_dictionaries(arg_list, /, arg_function=lambda x: x):
     assert callable(arg_function)
     _map_list = arg_list
-    if hasattr(arg_list, 'exhaust') and callable(arg_list.exhaust):
-        _map_list = arg_list.exhaust()
+    if callable(exhaust := getattr(arg_list, 'exhaust', None)):
+        _map_list = exhaust()
     if isinstance(_map_list, list):
         _map_func = partial(lambda f, d: f(d) if isinstance(d, dict) else d, arg_function)
         return (True, list(map(_map_func, _map_list)),)
@@ -265,7 +265,7 @@ def parse_database_connection_string(database_connection_string):
         'OPTIONS': backend_options.get(driver),
     }
     db_dict.update(db_overrides.get(driver))
-    
+
     return db_dict
 
 
@@ -447,7 +447,7 @@ def django_queryset_generator(query_set, /, *,
                     yield query_set.filter(pk=key)[0]
                 except IndexError as exc:
                     msg = f'missing primary key: {key}'
-                    raise QuerySetEmptyError(msg, exc=exc, key=key) from exc
+                    raise QuerySetEmptyError(msg, key=key) from exc
                 key = None
                 gc.collect(generation=1)
             key = None
@@ -458,7 +458,7 @@ def django_queryset_generator(query_set, /, *,
                         yield query_set.filter(pk=key)[0]
                     except IndexError as exc:
                         msg = f'missing primary key: {key}'
-                        raise QuerySetEmptyError(msg, exc=exc, key=key) from exc
+                        raise QuerySetEmptyError(msg, key=key) from exc
                     key = None
                     gc.collect(generation=1)
                 key = None
@@ -470,4 +470,3 @@ def django_queryset_generator(query_set, /, *,
         gc.collect()
         if collecting:
             gc.enable()
-
