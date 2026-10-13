@@ -23,8 +23,11 @@ chown -R app:app .
 s6-setuidgid app \
     env HOME="${tmp_app_home}" DENO_COMPAT=1 deno run --no-config -A npm:npm ci --no-fund
 
+# best-effort advisory remediation: npm audit fix exits non-zero when the only
+# remaining fixes are breaking changes (needs --force). That is not a build
+# failure, so do not let it abort the script under set -eu before tsc runs.
 s6-setuidgid app \
-    env HOME="${tmp_app_home}" DENO_COMPAT=1 deno run --no-config -A npm:npm audit fix
+    env HOME="${tmp_app_home}" DENO_COMPAT=1 deno run --no-config -A npm:npm audit fix || true
 
 s6-setuidgid app \
     env HOME="${tmp_app_home}" ../node npm:typescript/tsc

@@ -73,12 +73,34 @@ record_deno_version() {
     local deno_bin
     deno_bin="${1:-./deno}"
 
+    # keep the record idempotent: multiple callers (build oneshot + yt-cipher)
+    # must not append duplicate deno_version lines
+    grep -q '^deno_version = ' /app/common/third_party_versions.py 2>/dev/null && return 0
+
     deno_version="$("${deno_bin}" -V | awk -v 'ev=31' '1 == NR && "deno" == $1 { print $2; ev=0; } END { exit ev; }')"
     test -n "${deno_version}"
     printf -- "deno_version = '%s'\n" "${deno_version}" >> /app/common/third_party_versions.py
 }
 
 set -eu
+
+# Serialize concurrent deno installs. At container startup the bgutil POT provider
+# build oneshot and the yt-cipher longrun both call this script. Without a lock they
+# race on /usr/local/bin/deno: one process hashes the file while the other is still
+# writing it, so shasum.py reports "File modified during processing", deletes deno,
+# and the build oneshot exits non-zero - which takes down the whole service bundle
+# (no POT provider, no cipher server, no web UI, no downloads). flock serialises the
+# callers; the second caller finds deno already installed and returns immediately.
+LOCKFILE='/run/lock/install_deno.lock'
+mkdir -p "$(dirname "${LOCKFILE}")"
+exec 9>"${LOCKFILE}"
+flock 9
+
+if command -v deno >/dev/null 2>&1; then
+    record_deno_version "$(command -v deno)"
+    exit 0
+fi
+
 deno_archive="deno-$(uname -m)-unknown-linux-gnu.zip"
 work_dir="$(mktemp -d)"
 _cleanup() {
