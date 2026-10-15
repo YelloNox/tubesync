@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # check=error=true
 
-ARG BGUTIL_YTDLP_POT_PROVIDER_VERSION="2.0.0"
+ARG BGUTIL_YTDLP_POT_PROVIDER_VERSION="2.0.2"
 ARG FFMPEG_VERSION="latest"
 ARG YTDLP_EJS_VERSION="0.8.0"
 
