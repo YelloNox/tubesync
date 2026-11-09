@@ -11,7 +11,7 @@ CONFIG_BASE_DIR = BASE_DIR
 DOWNLOADS_BASE_DIR = BASE_DIR
 
 
-VERSION = '0.18.5'
+VERSION = '0.19.0'
 DEBUG = 'true' == getenv('TUBESYNC_DEBUG').strip().lower()
 ALLOWED_HOSTS = []
 # This is not ever meant to be a public web interface so this isn't too critical
@@ -410,6 +410,7 @@ YOUTUBE_DEFAULTS = {
     },
 }
 COOKIES_FILE = CONFIG_BASE_DIR / 'cookies.txt'
+AGE_RESTRICTED_COOKIES_FILE = CONFIG_BASE_DIR / 'cookies-age-restricted.txt'
 YOUTUBE_INFO_SLEEP_REQUESTS = 1
 
 
