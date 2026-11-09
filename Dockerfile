@@ -506,10 +506,10 @@ RUN --mount=type=bind,source=fontawesome-free,target=/fontawesome-free \
   mv -v /app/tubesync/local_settings.py.container /app/tubesync/local_settings.py
 
 ARG BGUTIL_YTDLP_POT_PROVIDER_VERSION
-ADD --checksum="sha256:${BGUTIL_YTDLP_POT_PROVIDER_SHA256}" \
-    "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/${BGUTIL_YTDLP_POT_PROVIDER_VERSION}.tar.gz" \
+ADD "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/${BGUTIL_YTDLP_POT_PROVIDER_VERSION}.tar.gz" \
     /tmp/bgutil.tar.gz
 RUN set -eux ; \
+    echo "${BGUTIL_YTDLP_POT_PROVIDER_SHA256}  /tmp/bgutil.tar.gz" | sha256sum --check && \
     mkdir -p /app/bgutil-ytdlp-pot-provider && \
     tar -xzf /tmp/bgutil.tar.gz -C /app/bgutil-ytdlp-pot-provider \
         --strip-components=1 "bgutil-ytdlp-pot-provider-${BGUTIL_YTDLP_POT_PROVIDER_VERSION}/server" && \
