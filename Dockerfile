@@ -2,6 +2,7 @@
 # check=error=true
 
 ARG BGUTIL_YTDLP_POT_PROVIDER_VERSION="2.0.2"
+ARG BGUTIL_YTDLP_POT_PROVIDER_SHA256="1f2ae9ec39405b8e80397dfc2551f58deed09d8dff4b2b8fbc314df8e091c0a1"
 ARG FFMPEG_VERSION="latest"
 ARG YTDLP_EJS_VERSION="0.8.0"
 
@@ -505,7 +506,14 @@ RUN --mount=type=bind,source=fontawesome-free,target=/fontawesome-free \
   mv -v /app/tubesync/local_settings.py.container /app/tubesync/local_settings.py
 
 ARG BGUTIL_YTDLP_POT_PROVIDER_VERSION
-ADD --checksum=26475e9d3665b972c4aeb83b4dbaafcf64b88438 "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git#${BGUTIL_YTDLP_POT_PROVIDER_VERSION}:server" /app/bgutil-ytdlp-pot-provider/server
+ADD --checksum="sha256:${BGUTIL_YTDLP_POT_PROVIDER_SHA256}" \
+    "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/${BGUTIL_YTDLP_POT_PROVIDER_VERSION}.tar.gz" \
+    /tmp/bgutil.tar.gz
+RUN set -eux ; \
+    mkdir -p /app/bgutil-ytdlp-pot-provider && \
+    tar -xzf /tmp/bgutil.tar.gz -C /app/bgutil-ytdlp-pot-provider \
+        --strip-components=1 "bgutil-ytdlp-pot-provider-${BGUTIL_YTDLP_POT_PROVIDER_VERSION}/server" && \
+    rm -f /tmp/bgutil.tar.gz
 RUN ls -alR /app/bgutil-ytdlp-pot-provider
 
 ARG YTDLP_EJS_VERSION
